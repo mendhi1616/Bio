@@ -1,0 +1,15 @@
+name: livecell-app
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - scikit-image
+  - matplotlib
+  - tifffile
+  - scipy
+  - pip
+  - pip:
+      - streamlit
+      - cellpose==3.0.7
