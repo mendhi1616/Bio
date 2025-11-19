@@ -235,11 +235,12 @@ def main(page: ft.Page):
     folder_picker = ft.FilePicker()
     page.overlay.append(folder_picker)
     status = ft.Text("", selectable=True)
-
+    def on_folder_picked(e: ft.FilePickerResultEvent):
+        pass
     pick_folder_btn = ft.ElevatedButton(
         "Choisir un dossier",
-        icon="folder_open",
-        on_click=lambda _: folder_picker.get_directory_path()
+        icon=ft.Icon(name="folder_open"),
+        on_click=on_folder_picked
     )
 
     detect_btn = ft.ElevatedButton("Détecter les conditions", icon="search")
@@ -328,7 +329,7 @@ def main(page: ft.Page):
             conditions_panel.controls.append(ft.Container(content=tile, padding=8, border=ft.border.all(1), border_radius=6))
         page.update()
 
-    def on_folder_picked_result(e: ft.FilePickerResultEvent):
+    def on_folder_picked(e: ft.FilePickerResultEvent):
         if e.path:
             data_root.value = e.path
             log_view.controls.clear()
@@ -336,7 +337,7 @@ def main(page: ft.Page):
             detect_conditions() 
             page.update()
 
-    folder_picker.on_result = on_folder_picked_result
+    folder_picker.on_result = on_folder_picked
 
     preview_img = ft.Image(src="", width=700, height=700, fit=ft.ImageFit.CONTAIN, border_radius=8)
     spinner = ft.ProgressRing(width=40, height=40, visible=False, color="blue")
@@ -359,7 +360,7 @@ def main(page: ft.Page):
 
     def on_file_picked(e: ft.FilePickerResultEvent):
         nonlocal preview_file_path
-        # Ne pas effacer les logs ici
+        log_view.controls.clear()
         if e.files:
             preview_file_path = e.files[0].path or e.files[0].name
             picked_path_text.value = f"Fichier sélectionné : {os.path.basename(preview_file_path)}"
@@ -622,7 +623,7 @@ def main(page: ft.Page):
     preview_controls = ft.Column(
         [
             ft.Text("Prévisualisation IA (Cellpose cyto3)", weight=ft.FontWeight.BOLD, size=16),
-            ft.Row([pick_btn, picked_path_text]),
+            ft.Row([pick_folder_btn, picked_path_text]),
             ft.Divider(),
             ft.Row(
                 [
@@ -690,15 +691,8 @@ def main(page: ft.Page):
 
         toggle_ui(False)
         progress = ft.ProgressBar(width=520)
-
-        # On insère la barre de progression dans l'onglet Logs (index 2)
-        log_tab_content = tabs.tabs[2].content
-        log_tab_content.controls.insert(0, progress)
-        log_tab_content.controls.insert(0, ft.Text("Analyse en cours..."))
-
-        # On switch sur l'onglet Logs
-        tabs.selected_index = 2
-        page.update()
+        tabs.tabs[0].content.controls[:] = [ft.Text("Analyse en cours..."), progress]
+        log_view.controls.clear()
 
         method = seg_method.value
         if deep_check.value and method not in ("cellpose",):
@@ -735,12 +729,6 @@ def main(page: ft.Page):
                 progress.value = done / max(1, total)
                 page.update()
 
-        # Remove progress bar from Logs tab
-        log_tab_content = tabs.tabs[2].content
-        if len(log_tab_content.controls) >= 2 and isinstance(log_tab_content.controls[1], ft.ProgressBar):
-             log_tab_content.controls.pop(0) # Remove text
-             log_tab_content.controls.pop(0) # Remove progress bar
-
         toggle_ui(True)
         status.value = "Analyse terminée"
         page.update()
@@ -755,8 +743,7 @@ def main(page: ft.Page):
         # ----------------------------------------------------------------------
         # TRACKING — AFFICHAGE TABLEAU
         # ----------------------------------------------------------------------
-        # Tracking est maintenant à l'index 1
-        tracking_tab = tabs.tabs[1].content
+        tracking_tab = tabs.tabs[2].content
         tracking_tab.controls.clear()
 
         if not all_tracks or len(all_tracks) == 0:
@@ -872,16 +859,16 @@ def main(page: ft.Page):
         animation_duration=300,
         tabs=[
             ft.Tab(
+                text="Analyse",
+                content=ft.Column([log_view], expand=True)
+            ),
+            ft.Tab(
                 text="Prévisualisation",
                 content=preview_controls
             ),
             ft.Tab(
                 text="Tracking",
                 content=ft.Column([], scroll=ft.ScrollMode.AUTO)
-            ),
-            ft.Tab(
-                text="Logs",
-                content=ft.Column([log_view], expand=True)
             ),
         ],
         expand=True,

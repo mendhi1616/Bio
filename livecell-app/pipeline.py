@@ -691,7 +691,8 @@ def compute_motion_features(tracks, pixel_size, dt):
         dy = df["y"].iloc[-1] - df["y"].iloc[0]
         return np.sqrt(dx**2 + dy**2) * pixel_size
 
-    net_disp = tracks.groupby("track_id").apply(_net_disp_um)
+    # Correction pour éviter FutureWarning pandas
+    net_disp = tracks.groupby("track_id")[["x", "y"]].apply(_net_disp_um)
     tracks["net_displacement_um"] = tracks["track_id"].map(net_disp)
 
     tracks["straightness"] = 0.0
