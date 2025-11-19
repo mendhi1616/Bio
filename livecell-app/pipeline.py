@@ -199,7 +199,7 @@ def process_file(path, seg_method="auto", logger=None, debug=False):
             logger(f"🖼 Overlay sauvegardé : {overlay_path}")
 
     # --- FIN ---
-    return metrics, tracks
+    return metrics, tracks, stack
 
 
 def lap_match(prev_df, next_df, max_dist=25.0):
@@ -691,7 +691,8 @@ def compute_motion_features(tracks, pixel_size, dt):
         dy = df["y"].iloc[-1] - df["y"].iloc[0]
         return np.sqrt(dx**2 + dy**2) * pixel_size
 
-    net_disp = tracks.groupby("track_id").apply(_net_disp_um)
+    # Correction pour éviter FutureWarning pandas
+    net_disp = tracks.groupby("track_id")[["x", "y"]].apply(_net_disp_um)
     tracks["net_displacement_um"] = tracks["track_id"].map(net_disp)
 
     tracks["straightness"] = 0.0
@@ -807,6 +808,10 @@ def generate_overlay_preview(path, sigma, min_size, clahe_clip, deep_enhance, lo
 
     # INITIALISATION CELLPOSE POUR LA PREVIEW
     global GLOBAL_MODEL
+
+    # --- GPU ---
+    use_gpu = torch.cuda.is_available() if TORCH_OK else False
+
     if GLOBAL_MODEL is None and CELLPOSE_OK:
         if logger: logger("[INFO] Initialisation du modèle Cellpose pour la PREVIEW…")
         try:
