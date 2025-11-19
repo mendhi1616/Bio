@@ -690,8 +690,11 @@ def main(page: ft.Page):
 
         toggle_ui(False)
         progress = ft.ProgressBar(width=520)
-        tabs.tabs[0].content.controls[:] = [ft.Text("Analyse en cours..."), progress]
-        log_view.controls.clear()
+        # tabs.tabs[0].content.controls[:] = [ft.Text("Analyse en cours..."), progress]
+        # log_view.controls.clear()
+        tabs.tabs[0].content.controls.insert(0, progress)
+        tabs.tabs[0].content.controls.insert(0, ft.Text("Analyse en cours..."))
+        page.update()
 
         method = seg_method.value
         if deep_check.value and method not in ("cellpose",):
@@ -727,6 +730,11 @@ def main(page: ft.Page):
                 done += 1
                 progress.value = done / max(1, total)
                 page.update()
+
+        # Remove progress bar
+        if len(tabs.tabs[0].content.controls) >= 2:
+            tabs.tabs[0].content.controls.pop(0) # Remove text
+            tabs.tabs[0].content.controls.pop(0) # Remove progress bar
 
         toggle_ui(True)
         status.value = "Analyse terminée"
