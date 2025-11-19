@@ -115,7 +115,7 @@ def check_and_register_on_start(username_hint=None, ui_notify=None):
 class TrackViewer(ft.Container):
     def __init__(self, stack, tracking_df):
         super().__init__(
-            bgcolor="black",
+            bgcolor=ft.colors.BLACK,
             padding=10,
             expand=True
         )
@@ -138,13 +138,13 @@ class TrackViewer(ft.Container):
         self.play_btn = ft.TextButton(
             "▶",
             on_click=self.toggle_play,
-            style=ft.ButtonStyle(color="white")
+            style=ft.ButtonStyle(color=ft.colors.WHITE)
         )
 
         self.close_btn = ft.TextButton(
             "✖",
             on_click=self.close,
-            style=ft.ButtonStyle(color="red400")
+            style=ft.ButtonStyle(color=ft.colors.RED_400)
         )
 
         self.content = ft.Column(
@@ -235,11 +235,12 @@ def main(page: ft.Page):
     folder_picker = ft.FilePicker()
     page.overlay.append(folder_picker)
     status = ft.Text("", selectable=True)
-
+    def on_folder_picked(e: ft.FilePickerResultEvent):
+        pass
     pick_folder_btn = ft.ElevatedButton(
         "Choisir un dossier",
-        icon="folder_open",
-        on_click=lambda _: folder_picker.get_directory_path()
+        icon=ft.Icon(name="folder_open"),
+        on_click=on_folder_picked
     )
 
     detect_btn = ft.ElevatedButton("Détecter les conditions", icon="search")
@@ -328,7 +329,7 @@ def main(page: ft.Page):
             conditions_panel.controls.append(ft.Container(content=tile, padding=8, border=ft.border.all(1), border_radius=6))
         page.update()
 
-    def on_folder_picked_result(e: ft.FilePickerResultEvent):
+    def on_folder_picked(e: ft.FilePickerResultEvent):
         if e.path:
             data_root.value = e.path
             log_view.controls.clear()
@@ -336,7 +337,7 @@ def main(page: ft.Page):
             detect_conditions() 
             page.update()
 
-    folder_picker.on_result = on_folder_picked_result
+    folder_picker.on_result = on_folder_picked
 
     preview_img = ft.Image(src="", width=700, height=700, fit=ft.ImageFit.CONTAIN, border_radius=8)
     spinner = ft.ProgressRing(width=40, height=40, visible=False, color="blue")
@@ -359,7 +360,7 @@ def main(page: ft.Page):
 
     def on_file_picked(e: ft.FilePickerResultEvent):
         nonlocal preview_file_path
-        # Ne pas effacer les logs ici
+        log_view.controls.clear()
         if e.files:
             preview_file_path = e.files[0].path or e.files[0].name
             picked_path_text.value = f"Fichier sélectionné : {os.path.basename(preview_file_path)}"
@@ -622,7 +623,7 @@ def main(page: ft.Page):
     preview_controls = ft.Column(
         [
             ft.Text("Prévisualisation IA (Cellpose cyto3)", weight=ft.FontWeight.BOLD, size=16),
-            ft.Row([pick_btn, picked_path_text]),
+            ft.Row([pick_folder_btn, picked_path_text]),
             ft.Divider(),
             ft.Row(
                 [
@@ -690,15 +691,8 @@ def main(page: ft.Page):
 
         toggle_ui(False)
         progress = ft.ProgressBar(width=520)
-
-        # On insère la barre de progression dans l'onglet Analyse (index 0)
-        log_tab_content = tabs.tabs[0].content
-        log_tab_content.controls.insert(0, progress)
-        log_tab_content.controls.insert(0, ft.Text("Analyse en cours..."))
-
-        # On switch sur l'onglet Analyse
-        tabs.selected_index = 0
-        page.update()
+        tabs.tabs[0].content.controls[:] = [ft.Text("Analyse en cours..."), progress]
+        log_view.controls.clear()
 
         method = seg_method.value
         if deep_check.value and method not in ("cellpose",):
@@ -735,12 +729,6 @@ def main(page: ft.Page):
                 progress.value = done / max(1, total)
                 page.update()
 
-        # Remove progress bar from Analyse tab
-        log_tab_content = tabs.tabs[0].content
-        if len(log_tab_content.controls) >= 2 and isinstance(log_tab_content.controls[1], ft.ProgressBar):
-             log_tab_content.controls.pop(0) # Remove text
-             log_tab_content.controls.pop(0) # Remove progress bar
-
         toggle_ui(True)
         status.value = "Analyse terminée"
         page.update()
@@ -752,23 +740,16 @@ def main(page: ft.Page):
         results = pd.concat(all_results, ignore_index=True)
         log(f"Résultats : {len(results)} lignes")
 
-        # Génération des graphiques
-        out_dir = os.path.join(root, "outputs")
-        plot_paths = plot_curves(results, out_dir=out_dir)
-        if plot_paths:
-            log(f"Graphiques générés : {len(plot_paths)}")
-
         # ----------------------------------------------------------------------
         # TRACKING — AFFICHAGE TABLEAU
         # ----------------------------------------------------------------------
-        # Tracking est maintenant à l'index 2
         tracking_tab = tabs.tabs[2].content
         tracking_tab.controls.clear()
 
         if not all_tracks or len(all_tracks) == 0:
             log("[WARN] Aucun tracking détecté.")
             tracking_tab.controls.append(
-                ft.Text("Aucune cellule suivie dans cette vidéo.", color="red300")
+                ft.Text("Aucune cellule suivie dans cette vidéo.", color=ft.colors.RED_300)
             )
             tracking_tab.update()
             return
@@ -778,7 +759,7 @@ def main(page: ft.Page):
         if tracking_df.shape[0] == 0:
             log("[WARN] Tracking vide.")
             tracking_tab.controls.append(
-                ft.Text("Aucune cellule suivie.", color="red300")
+                ft.Text("Aucune cellule suivie.", color=ft.colors.RED_300)
             )
             tracking_tab.update()
             return
@@ -792,9 +773,18 @@ def main(page: ft.Page):
             "feret_max_um", "angle_deg", "straightness",
         ]
 
-        # --- TABLE UNIQUE (Header + Content) pour alignement correct ---
-        data_table = ft.DataTable(
+        # --- HEADER FIXE ---
+        header_table = ft.DataTable(
             columns=[ft.DataColumn(ft.Text(col)) for col in columns],
+            rows=[],
+            horizontal_margin=10,
+            column_spacing=20,
+        )
+
+
+        # --- TABLE DES LIGNES ---
+        rows_table = ft.DataTable(
+            columns=[ft.DataColumn(ft.Container(width=0)) for col in columns],
             rows=[
                 ft.DataRow(
                     cells=[
@@ -816,12 +806,13 @@ def main(page: ft.Page):
 
         # --- SCROLL FIX compatible Flet < 0.19 ---
         scroll_area = ft.Column(
-            controls=[data_table],
+            controls=[rows_table],
             expand=True,
             scroll=ft.ScrollMode.ALWAYS,
         )
 
         # Injection dans l’onglet Tracking
+        tracking_tab.controls.append(header_table)
         tracking_tab.controls.append(scroll_area)
         tracking_tab.update()
 
@@ -834,36 +825,7 @@ def main(page: ft.Page):
             page.update()
 
         view_btn = ft.TextButton("👁 Visualiser Track (Dernier Fichier)", on_click=open_track_viewer)
-
-        # Bouton pour voir les graphiques
-        def show_graphs(e):
-            if not plot_paths:
-                log("[WARN] Aucun graphique disponible.")
-                return
-
-            dlg_content = ft.Column(
-                controls=[
-                    ft.Image(src=p, width=600, fit=ft.ImageFit.CONTAIN)
-                    for p in plot_paths
-                ],
-                scroll=ft.ScrollMode.AUTO,
-                height=600,
-            )
-
-            page.dialog = ft.AlertDialog(
-                title=ft.Text("Visualisation des graphiques"),
-                content=dlg_content,
-                actions=[ft.TextButton("Fermer", on_click=lambda _: (setattr(page.dialog, 'open', False), page.update()))],
-            )
-            page.dialog.open = True
-            page.update()
-
-        graph_btn = ft.ElevatedButton(
-            "📊 Visualiser les graphiques",
-            on_click=show_graphs
-        )
-
-        tracking_tab.controls.append(ft.Row([view_btn, graph_btn]))
+        tracking_tab.controls.append(view_btn)
 
         # Export CSV
         def export_csv(e):
@@ -875,8 +837,8 @@ def main(page: ft.Page):
             "Export CSV",
             icon=ft.Icon(name="download"),
             on_click=export_csv,
-            bgcolor="blue700",
-            color="white",
+            bgcolor=ft.colors.BLUE_700,
+            color=ft.colors.WHITE,
         )
 
 
