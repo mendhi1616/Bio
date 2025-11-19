@@ -359,7 +359,7 @@ def main(page: ft.Page):
 
     def on_file_picked(e: ft.FilePickerResultEvent):
         nonlocal preview_file_path
-        log_view.controls.clear()
+        # Ne pas effacer les logs ici
         if e.files:
             preview_file_path = e.files[0].path or e.files[0].name
             picked_path_text.value = f"Fichier sélectionné : {os.path.basename(preview_file_path)}"
