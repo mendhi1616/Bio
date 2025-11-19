@@ -622,7 +622,7 @@ def main(page: ft.Page):
     preview_controls = ft.Column(
         [
             ft.Text("Prévisualisation IA (Cellpose cyto3)", weight=ft.FontWeight.BOLD, size=16),
-            ft.Row([pick_folder_btn, picked_path_text]),
+            ft.Row([pick_btn, picked_path_text]),
             ft.Divider(),
             ft.Row(
                 [
