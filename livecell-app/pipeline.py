@@ -807,6 +807,10 @@ def generate_overlay_preview(path, sigma, min_size, clahe_clip, deep_enhance, lo
 
     # INITIALISATION CELLPOSE POUR LA PREVIEW
     global GLOBAL_MODEL
+
+    # --- GPU ---
+    use_gpu = torch.cuda.is_available() if TORCH_OK else False
+
     if GLOBAL_MODEL is None and CELLPOSE_OK:
         if logger: logger("[INFO] Initialisation du modèle Cellpose pour la PREVIEW…")
         try:
