@@ -235,12 +235,11 @@ def main(page: ft.Page):
     folder_picker = ft.FilePicker()
     page.overlay.append(folder_picker)
     status = ft.Text("", selectable=True)
-    def on_folder_picked(e: ft.FilePickerResultEvent):
-        pass
+
     pick_folder_btn = ft.ElevatedButton(
         "Choisir un dossier",
-        icon=ft.Icon(name="folder_open"),
-        on_click=on_folder_picked
+        icon="folder_open",
+        on_click=lambda _: folder_picker.get_directory_path()
     )
 
     detect_btn = ft.ElevatedButton("Détecter les conditions", icon="search")
@@ -329,7 +328,7 @@ def main(page: ft.Page):
             conditions_panel.controls.append(ft.Container(content=tile, padding=8, border=ft.border.all(1), border_radius=6))
         page.update()
 
-    def on_folder_picked(e: ft.FilePickerResultEvent):
+    def on_folder_picked_result(e: ft.FilePickerResultEvent):
         if e.path:
             data_root.value = e.path
             log_view.controls.clear()
@@ -337,7 +336,7 @@ def main(page: ft.Page):
             detect_conditions() 
             page.update()
 
-    folder_picker.on_result = on_folder_picked
+    folder_picker.on_result = on_folder_picked_result
 
     preview_img = ft.Image(src="", width=700, height=700, fit=ft.ImageFit.CONTAIN, border_radius=8)
     spinner = ft.ProgressRing(width=40, height=40, visible=False, color="blue")
@@ -360,7 +359,7 @@ def main(page: ft.Page):
 
     def on_file_picked(e: ft.FilePickerResultEvent):
         nonlocal preview_file_path
-        log_view.controls.clear()
+        # Ne pas effacer les logs ici
         if e.files:
             preview_file_path = e.files[0].path or e.files[0].name
             picked_path_text.value = f"Fichier sélectionné : {os.path.basename(preview_file_path)}"
