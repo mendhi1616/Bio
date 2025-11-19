@@ -235,12 +235,11 @@ def main(page: ft.Page):
     folder_picker = ft.FilePicker()
     page.overlay.append(folder_picker)
     status = ft.Text("", selectable=True)
-    def on_folder_picked(e: ft.FilePickerResultEvent):
-        pass
+
     pick_folder_btn = ft.ElevatedButton(
         "Choisir un dossier",
-        icon=ft.Icon(name="folder_open"),
-        on_click=on_folder_picked
+        icon="folder_open",
+        on_click=lambda _: folder_picker.get_directory_path()
     )
 
     detect_btn = ft.ElevatedButton("Détecter les conditions", icon="search")
@@ -329,7 +328,7 @@ def main(page: ft.Page):
             conditions_panel.controls.append(ft.Container(content=tile, padding=8, border=ft.border.all(1), border_radius=6))
         page.update()
 
-    def on_folder_picked(e: ft.FilePickerResultEvent):
+    def on_folder_picked_result(e: ft.FilePickerResultEvent):
         if e.path:
             data_root.value = e.path
             log_view.controls.clear()
@@ -337,7 +336,7 @@ def main(page: ft.Page):
             detect_conditions() 
             page.update()
 
-    folder_picker.on_result = on_folder_picked
+    folder_picker.on_result = on_folder_picked_result
 
     preview_img = ft.Image(src="", width=700, height=700, fit=ft.ImageFit.CONTAIN, border_radius=8)
     spinner = ft.ProgressRing(width=40, height=40, visible=False, color="blue")
@@ -662,32 +661,6 @@ def main(page: ft.Page):
 
 
     # ----------------------------------------------------------------------
-    # TRACKING — AFFICHAGE TABLEAU
-    # ----------------------------------------------------------------------
-    tracking_tab = tabs.tabs[2].content
-    tracking_tab.controls.clear()
-
-    if not all_tracks or len(all_tracks) == 0:
-        log("[WARN] Aucun tracking détecté.")
-        tracking_tab.controls.append(
-            ft.Text("Aucune cellule suivie dans cette vidéo.", color=ft.colors.RED_300)
-        )
-        tracking_tab.update()
-        return
-
-    tracking_df = pd.concat(all_tracks, ignore_index=True).fillna(0)
-
-    if tracking_df.shape[0] == 0:
-        log("[WARN] Tracking vide.")
-        tracking_tab.controls.append(
-            ft.Text("Aucune cellule suivie.", color=ft.colors.RED_300)
-        )
-        tracking_tab.update()
-        return
-
-
-
-    # ----------------------------------------------------------------------
     # LANCEMENT DE L'ANALYSE
     # ----------------------------------------------------------------------
     def run_analysis(e=None):
@@ -695,6 +668,9 @@ def main(page: ft.Page):
 
         all_results = []
         all_tracks = []
+
+        # We'll store the last processed stack here for visualization
+        last_stack = None
 
         if not os.path.isdir(root):
             status.value = "Le dossier data/ est introuvable."
@@ -733,10 +709,12 @@ def main(page: ft.Page):
                 page.update()
 
                 try:
-                    metrics, tracks = process_file(
+                    # Now extracting stack as well
+                    metrics, tracks, current_stack = process_file(
                         pth, seg_method=method, logger=log, debug=True
                     )
 
+                    last_stack = current_stack
                     all_tracks.append(tracks)
                     metrics["condition"] = cond
                     all_results.append(metrics)
@@ -761,86 +739,111 @@ def main(page: ft.Page):
         results = pd.concat(all_results, ignore_index=True)
         log(f"Résultats : {len(results)} lignes")
 
+        # ----------------------------------------------------------------------
+        # TRACKING — AFFICHAGE TABLEAU
+        # ----------------------------------------------------------------------
+        tracking_tab = tabs.tabs[2].content
+        tracking_tab.controls.clear()
 
-
-    # Colonnes affichées
-    columns = [
-        "track_id", "t", "x", "y",
-        "speed_um_s", "cum_distance_um",
-        "area_um2", "circularity", "eccentricity",
-        "aspect_ratio", "solidity",
-        "feret_max_um", "angle_deg", "straightness",
-    ]
-
-    # --- HEADER FIXE ---
-    header_table = ft.DataTable(
-        columns=[ft.DataColumn(ft.Text(col)) for col in columns],
-        rows=[],
-        horizontal_margin=10,
-        column_spacing=20,
-    )
-
-
-    # --- TABLE DES LIGNES ---
-    rows_table = ft.DataTable(
-        columns=[ft.DataColumn(ft.Container(width=0)) for col in columns],
-        rows=[
-            ft.DataRow(
-                cells=[
-                    ft.DataCell(
-                        ft.Text(
-                            str(r[col])
-                            if isinstance(r[col], str)
-                            else f"{r[col]:.2f}"
-                        )
-                    )
-                    for col in columns
-                ]
+        if not all_tracks or len(all_tracks) == 0:
+            log("[WARN] Aucun tracking détecté.")
+            tracking_tab.controls.append(
+                ft.Text("Aucune cellule suivie dans cette vidéo.", color=ft.colors.RED_300)
             )
-            for _, r in tracking_df.iterrows()
-        ],
-        horizontal_margin=10,
-        column_spacing=20,
-    )
+            tracking_tab.update()
+            return
 
-    # --- SCROLL FIX compatible Flet < 0.19 ---
-    scroll_area = ft.Column(
-        controls=[rows_table],
-        expand=True,
-        scroll=ft.ScrollMode.ALWAYS,
-    )
+        tracking_df = pd.concat(all_tracks, ignore_index=True).fillna(0)
 
-    # Injection dans l’onglet Tracking
-    tracking_tab.controls.append(header_table)
-    tracking_tab.controls.append(scroll_area)
-    tracking_tab.update()
+        if tracking_df.shape[0] == 0:
+            log("[WARN] Tracking vide.")
+            tracking_tab.controls.append(
+                ft.Text("Aucune cellule suivie.", color=ft.colors.RED_300)
+            )
+            tracking_tab.update()
+            return
 
-    def open_track_viewer(e):
-        viewer = TrackViewer(stack, tracking_df)
-        page.overlay.append(viewer)
-        page.update()
+        # Colonnes affichées
+        columns = [
+            "track_id", "t", "x", "y",
+            "speed_um_s", "cum_distance_um",
+            "area_um2", "circularity", "eccentricity",
+            "aspect_ratio", "solidity",
+            "feret_max_um", "angle_deg", "straightness",
+        ]
 
-    view_btn = ft.TextButton("👁 Visualiser Track", on_click=open_track_viewer)
-    tracking_tab.controls.append(view_btn)
-
-    # Export CSV
-    def export_csv(e):
-        out_path = os.path.join(root, "tracking_results.csv")
-        tracking_df.to_csv(out_path, index=False)
-        log(f"[EXPORT] CSV sauvegardé : {out_path}")
-
-    export_button = ft.ElevatedButton(
-        "Export CSV",
-        icon=ft.Icon(name="download"),
-        on_click=export_csv,
-        bgcolor=ft.colors.BLUE_700,
-        color=ft.colors.WHITE,
-    )
+        # --- HEADER FIXE ---
+        header_table = ft.DataTable(
+            columns=[ft.DataColumn(ft.Text(col)) for col in columns],
+            rows=[],
+            horizontal_margin=10,
+            column_spacing=20,
+        )
 
 
-    tracking_tab.controls.append(ft.Container(height=10))
-    tracking_tab.controls.append(export_button)
-    tracking_tab.update()
+        # --- TABLE DES LIGNES ---
+        rows_table = ft.DataTable(
+            columns=[ft.DataColumn(ft.Container(width=0)) for col in columns],
+            rows=[
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(
+                            ft.Text(
+                                str(r[col])
+                                if isinstance(r[col], str)
+                                else f"{r[col]:.2f}"
+                            )
+                        )
+                        for col in columns
+                    ]
+                )
+                for _, r in tracking_df.iterrows()
+            ],
+            horizontal_margin=10,
+            column_spacing=20,
+        )
+
+        # --- SCROLL FIX compatible Flet < 0.19 ---
+        scroll_area = ft.Column(
+            controls=[rows_table],
+            expand=True,
+            scroll=ft.ScrollMode.ALWAYS,
+        )
+
+        # Injection dans l’onglet Tracking
+        tracking_tab.controls.append(header_table)
+        tracking_tab.controls.append(scroll_area)
+        tracking_tab.update()
+
+        def open_track_viewer(e):
+            if last_stack is None:
+                log("[ERREUR] Pas d'image disponible pour la visualisation.")
+                return
+            viewer = TrackViewer(last_stack, tracking_df)
+            page.overlay.append(viewer)
+            page.update()
+
+        view_btn = ft.TextButton("👁 Visualiser Track (Dernier Fichier)", on_click=open_track_viewer)
+        tracking_tab.controls.append(view_btn)
+
+        # Export CSV
+        def export_csv(e):
+            out_path = os.path.join(root, "tracking_results.csv")
+            tracking_df.to_csv(out_path, index=False)
+            log(f"[EXPORT] CSV sauvegardé : {out_path}")
+
+        export_button = ft.ElevatedButton(
+            "Export CSV",
+            icon=ft.Icon(name="download"),
+            on_click=export_csv,
+            bgcolor=ft.colors.BLUE_700,
+            color=ft.colors.WHITE,
+        )
+
+
+        tracking_tab.controls.append(ft.Container(height=10))
+        tracking_tab.controls.append(export_button)
+        tracking_tab.update()
 
 
 
@@ -849,6 +852,26 @@ def main(page: ft.Page):
 
 
     run_btn.on_click = run_analysis
+
+    tabs = ft.Tabs(
+        selected_index=0,
+        animation_duration=300,
+        tabs=[
+            ft.Tab(
+                text="Analyse",
+                content=ft.Column([log_view], expand=True)
+            ),
+            ft.Tab(
+                text="Prévisualisation",
+                content=preview_controls
+            ),
+            ft.Tab(
+                text="Tracking",
+                content=ft.Column([], scroll=ft.ScrollMode.AUTO)
+            ),
+        ],
+        expand=True,
+    )
 
     page.add(
         ft.Text("Test Version 2.0", weight=ft.FontWeight.BOLD, size=18),
