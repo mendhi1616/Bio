@@ -755,22 +755,45 @@ def compute_group_stats(results):
     return auc_df, ttest
 
 def plot_curves(results, out_dir="outputs"):
-    os.makedirs(out_dir, exist_ok=True); saved = []
-    if results.empty: return saved
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+    os.makedirs(out_dir, exist_ok=True)
+    saved = []
+    if results is None or results.empty:
+        return saved
+
     mean_prolif = results.groupby(["condition","t"])["n_cells"].mean().reset_index()
     mean_surv = results.groupby(["condition","t"])["survival_frac"].mean().reset_index()
-    for cond in results["condition"].unique():
-        sub_p = mean_prolif[mean_prolif["condition"]==cond]
-        fig1 = plt.figure(); plt.plot(sub_p["t"], sub_p["n_cells"], marker="o")
-        plt.xlabel("Frame"); plt.ylabel("Nombre de cellules"); plt.title(f"Prolifération — {cond}")
-        p1 = os.path.join(out_dir, f"proliferation_{cond}.png"); fig1.savefig(p1, bbox_inches="tight", dpi=160)
-        plt.close(fig1); saved.append(p1)
 
+    for cond in results["condition"].unique():
+        # --- Proliferation ---
+        sub_p = mean_prolif[mean_prolif["condition"]==cond]
+        fig1 = Figure()
+        ax1 = fig1.add_subplot(111)
+        ax1.plot(sub_p["t"], sub_p["n_cells"], marker="o")
+        ax1.set_xlabel("Frame")
+        ax1.set_ylabel("Nombre de cellules")
+        ax1.set_title(f"Prolifération — {cond}")
+
+        p1 = os.path.join(out_dir, f"proliferation_{cond}.png")
+        FigureCanvasAgg(fig1).print_png(p1)
+        saved.append(p1)
+
+        # --- Survival ---
         sub_s = mean_surv[mean_surv["condition"]==cond]
-        fig2 = plt.figure(); plt.plot(sub_s["t"], sub_s["survival_frac"], marker="o")
-        plt.xlabel("Frame"); plt.ylabel("Survie"); plt.title(f"Survie — {cond}"); plt.ylim(0,1.05)
-        p2 = os.path.join(out_dir, f"survival_{cond}.png"); fig2.savefig(p2, bbox_inches="tight", dpi=160)
-        plt.close(fig2); saved.append(p2)
+        fig2 = Figure()
+        ax2 = fig2.add_subplot(111)
+        ax2.plot(sub_s["t"], sub_s["survival_frac"], marker="o")
+        ax2.set_xlabel("Frame")
+        ax2.set_ylabel("Survie")
+        ax2.set_title(f"Survie — {cond}")
+        ax2.set_ylim(0, 1.05)
+
+        p2 = os.path.join(out_dir, f"survival_{cond}.png")
+        FigureCanvasAgg(fig2).print_png(p2)
+        saved.append(p2)
+
     return saved
 
 def _select_sharpest_frame(stack, logger=None):
