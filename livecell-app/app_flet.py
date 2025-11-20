@@ -975,23 +975,29 @@ def main(page: ft.Page):
 
         # --- GLOBAL ACTIONS DEFINITION (moved before render) ---
         out_dir = os.path.join(root, "outputs")
-        # Plot curves using GLOBAL_FULL_DF (all files metrics)
-        # We initialize it here, but we should update it if it changes.
-        # Since this is inside run_analysis, GLOBAL_FULL_DF is fixed for this run.
-        saved_plots = plot_curves(GLOBAL_FULL_DF, out_dir=out_dir)
 
         def show_graphs(e):
             try:
-                log(f"Ouverture des courbes... ({len(saved_plots)} plots)")
+                # Feedback immédiat
+                page.snack_bar = ft.SnackBar(ft.Text("Génération des courbes en cours..."))
+                page.snack_bar.open = True
+                page.update()
+
+                # Re-generate curves on demand to ensure data is fresh
+                log(f"Génération des courbes pour {len(GLOBAL_FULL_DF) if GLOBAL_FULL_DF is not None else 0} entrées...")
+                saved_plots = plot_curves(GLOBAL_FULL_DF, out_dir=out_dir)
+
                 dlg_content = ft.Column(scroll=ft.ScrollMode.AUTO, height=600)
 
                 if not saved_plots:
                     dlg_content.controls.append(ft.Text("Aucun graphique généré. Vérifiez que l'analyse a produit des résultats.", color="red300"))
                 else:
                     for p_path in saved_plots:
-                        if os.path.exists(p_path):
+                        # Ensure path is absolute to avoid confusion
+                        abs_path = os.path.abspath(p_path)
+                        if os.path.exists(abs_path):
                              # Read as binary and convert to base64
-                             with open(p_path, "rb") as f:
+                             with open(abs_path, "rb") as f:
                                  b64 = base64.b64encode(f.read()).decode("utf-8")
                              dlg_content.controls.append(
                                  ft.Container(
@@ -1000,16 +1006,17 @@ def main(page: ft.Page):
                                  )
                              )
                         else:
-                             dlg_content.controls.append(ft.Text(f"Fichier introuvable : {p_path}", color="red300"))
+                             dlg_content.controls.append(ft.Text(f"Fichier introuvable : {abs_path}", color="red300"))
 
                 dlg = ft.AlertDialog(
                     title=ft.Text("Courbes Globales (Prolifération & Survie)"),
                     content=dlg_content,
                     actions=[ft.TextButton("Fermer", on_click=lambda _: page.close_dialog())],
                 )
-                page.dialog = dlg
+                e.page.dialog = dlg
                 dlg.open = True
-                page.update()
+                e.page.update()
+
             except Exception as ex:
                 log(f"[ERREUR] Affichage courbes : {ex}")
                 page.snack_bar = ft.SnackBar(ft.Text(f"Erreur: {ex}"))
