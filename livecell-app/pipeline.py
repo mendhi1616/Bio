@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 from scipy import ndimage as ndi, stats
 from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
+from scipy.optimize import linear_sum_assignment
 from skimage import filters, exposure, measure, morphology
 from skimage.util import img_as_float
 
@@ -253,31 +255,6 @@ def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=Fa
             logger(f"[CRASH] Erreur critique dans process_file: {e}")
             logger(traceback.format_exc()) # Affiche la ligne exacte de l'erreur
         raise e
-
-
-def lap_match(prev_df, next_df, max_dist=25.0):
-    if prev_df is None or len(prev_df) == 0:
-        return [None] * len(prev_df)
-
-    if next_df is None or len(next_df) == 0:
-        return [None] * len(prev_df)
-
-    # Matrice des distances
-    cost = cdist(prev_df[["x", "y"]], next_df[["x", "y"]])
-
-    # Interdire les distances trop grandes
-    cost[cost > max_dist] = 1e9
-
-    # Hungarian / LAP solver
-    rows, cols = linear_sum_assignment(cost)
-
-    match = [None] * len(prev_df)
-
-    for r, c in zip(rows, cols):
-        if cost[r, c] < 1e9:   # assignment valide
-            match[r] = next_df.index[c]
-
-    return match
 
 
 def set_advanced_params(**kwargs):
@@ -597,9 +574,6 @@ def link_frames(df_t, df_tp1, max_dist=15.0):
 
     return links
 
-
-from scipy.spatial.distance import cdist
-from scipy.optimize import linear_sum_assignment
 
 def _track_labels(labels_list, max_dist=15.0, logger=None, gap_frames=2):
     if logger:
