@@ -113,9 +113,9 @@ def check_and_register_on_start(username_hint=None, ui_notify=None):
     return False
 
 
-def draw_annotated_frame(img_orig, t, df, masks):
+def draw_annotated_frame(img_orig, t, df, masks, mitoses=None):
     """
-    Dessine les contours, tracks et IDs sur une frame donnée (numpy array).
+    Dessine les contours, tracks, IDs et événements de mitose sur une frame donnée.
     Retourne une image BGR prête pour OpenCV/VideoWriter/Display.
     """
     import cv2
@@ -143,36 +143,49 @@ def draw_annotated_frame(img_orig, t, df, masks):
                 cv2.drawContours(img, contours, -1, (0, 255, 0), 1)
 
     # 2) DESSINER LES QUEUES (TAILS)
-    # Filter history <= t
-    history_df = df[df["t"] <= t]
-    present_ids = df[df["t"] == t]["track_id"].unique()
+    if df is not None and not df.empty:
+        # Filter history <= t
+        history_df = df[df["t"] <= t]
+        present_ids = df[df["t"] == t]["track_id"].unique()
 
-    for tid in present_ids:
-        track_path = history_df[history_df["track_id"] == tid].sort_values("t")
-        pts = []
-        for _, r in track_path.iterrows():
-            pts.append([int(r["x"]), int(r["y"])])
+        for tid in present_ids:
+            track_path = history_df[history_df["track_id"] == tid].sort_values("t")
+            pts = []
+            for _, r in track_path.iterrows():
+                pts.append([int(r["x"]), int(r["y"])])
 
-        if len(pts) > 1:
-            pts_arr = np.array(pts, np.int32).reshape((-1, 1, 2))
-            # Yellow path
-            cv2.polylines(img, [pts_arr], isClosed=False, color=(0, 255, 255), thickness=2)
+            if len(pts) > 1:
+                pts_arr = np.array(pts, np.int32).reshape((-1, 1, 2))
+                # Yellow path
+                cv2.polylines(img, [pts_arr], isClosed=False, color=(0, 255, 255), thickness=2)
 
-    # 3) DESSINER LES POINTS COURANTS
-    track_starts = df.groupby("track_id")["t"].min()
+        # 3) DESSINER LES POINTS COURANTS
+        track_starts = df.groupby("track_id")["t"].min()
+        df_t = df[df["t"] == t]
+        
+        for _, row in df_t.iterrows():
+            x, y = int(row["x"]), int(row["y"])
+            tid = int(row["track_id"])
 
-    df_t = df[df["t"] == t]
-    for _, row in df_t.iterrows():
-        x, y = int(row["x"]), int(row["y"])
-        tid = int(row["track_id"])
+            t_start = track_starts.get(tid, 0)
+            age = t - t_start
+            # Cyan if new (<2 frames), Magenta otherwise
+            color = (255, 255, 0) if age < 2 else (255, 0, 255)
 
-        t_start = track_starts.get(tid, 0)
-        age = t - t_start
-        # Cyan if new (<2 frames), Magenta otherwise
-        color = (255, 255, 0) if age < 2 else (255, 0, 255)
+            cv2.circle(img, (x, y), 4, color, 2)
+            cv2.putText(img, str(tid), (x+8, y-8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
 
-        cv2.circle(img, (x, y), 4, color, 2)
-        cv2.putText(img, str(tid), (x+8, y-8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+    # 4) DESSINER LES MITOSES (Nouveau !)
+    if mitoses is not None and not mitoses.empty:
+        # On affiche les divisions récentes (ex: arrivées dans les 10 dernières frames)
+        # pour laisser le temps à l'œil de les voir
+        recent_mitosis = mitoses[(mitoses["t"] >= t - 10) & (mitoses["t"] <= t)]
+        
+        for _, ev in recent_mitosis.iterrows():
+            mx, my = int(ev["x"]), int(ev["y"])
+            # Croix rouge pour marquer la division
+            cv2.drawMarker(img, (mx, my), (0, 0, 255), cv2.MARKER_STAR, 10, 2)
+            cv2.putText(img, "DIV", (mx-10, my-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
 
     return img
 
@@ -827,7 +840,7 @@ def main(page: ft.Page):
 
                 try:
                     fname = os.path.basename(pth)
-                    metrics, tracks, current_stack, current_masks = process_file(
+                    metrics, tracks, current_stack, current_masks, mitoses = process_file(
                         pth, seg_method=method, logger=log, debug=False, fast_mode=use_fast
                     )
 
@@ -837,6 +850,7 @@ def main(page: ft.Page):
                         "stack": current_stack,
                         "masks": current_masks,
                         "metrics": metrics,
+                        "mitoses": mitoses,
                         "condition": cond
                     }
 

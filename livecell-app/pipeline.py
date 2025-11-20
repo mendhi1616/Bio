@@ -186,6 +186,14 @@ def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=Fa
         # --- Motion features ---
         tracks = compute_motion_features(tracks, pixel_size, dt)
 
+        # --- Motion features ---
+        tracks = compute_motion_features(tracks, pixel_size, dt)
+
+        # --- AJOUT : Détection Mitoses ---
+        mitoses = detect_mitosis_events(tracks, max_dist=30.0)
+        if not mitoses.empty and logger:
+            logger(f"    🧬 Mitoses détectées : {len(mitoses)} événements")
+
         # --- Metrics ---
         metrics = _metrics_from_tracks(tracks)
         metrics["file"] = os.path.basename(path)
@@ -218,7 +226,7 @@ def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=Fa
                 if logger: logger(f"[WARN] Erreur génération image debug : {e_img}")
 
         # --- FIN ---
-        return metrics, tracks, stack, labels_list
+        return metrics, tracks, stack, labels_list, mitoses
 
     except Exception as e:
         # --- CORRECTION 3 : Gestion globale des crashs ---
@@ -849,12 +857,15 @@ def compute_group_stats(results):
 
 def plot_curves(results, out_dir="outputs"):
     from matplotlib.figure import Figure
-    from matplotlib.backends.backend_agg import FigureCanvasAgg
-
+    
+    # On garde Agg pour éviter les conflits de thread, 
+    # mais on va retourner les objets Figure pour Flet.
+    
     os.makedirs(out_dir, exist_ok=True)
-    saved = []
+    figures = [] # Liste pour stocker (Titre, Figure)
+    
     if results is None or results.empty:
-        return saved
+        return figures
 
     mean_prolif = results.groupby(["condition","t"])["n_cells"].mean().reset_index()
     mean_surv = results.groupby(["condition","t"])["survival_frac"].mean().reset_index()
@@ -862,79 +873,155 @@ def plot_curves(results, out_dir="outputs"):
     for cond in results["condition"].unique():
         # --- Proliferation ---
         sub_p = mean_prolif[mean_prolif["condition"]==cond]
-        fig1 = Figure()
+        fig1 = Figure(figsize=(6, 4), dpi=100)
         ax1 = fig1.add_subplot(111)
-        ax1.plot(sub_p["t"], sub_p["n_cells"], marker="o")
+        ax1.plot(sub_p["t"], sub_p["n_cells"], marker="o", color="tab:blue")
         ax1.set_xlabel("Frame")
         ax1.set_ylabel("Nombre de cellules")
         ax1.set_title(f"Prolifération — {cond}")
-
-        p1 = os.path.join(out_dir, f"proliferation_{cond}.png")
-        FigureCanvasAgg(fig1).print_png(p1)
-        saved.append(p1)
+        ax1.grid(True, linestyle='--', alpha=0.6)
+        
+        # Sauvegarde disque (optionnel, pour garder une trace)
+        try:
+            fig1.savefig(os.path.join(out_dir, f"proliferation_{cond}.png"))
+        except: pass
+        
+        figures.append((f"Prolifération ({cond})", fig1))
 
         # --- Survival ---
         sub_s = mean_surv[mean_surv["condition"]==cond]
-        fig2 = Figure()
+        fig2 = Figure(figsize=(6, 4), dpi=100)
         ax2 = fig2.add_subplot(111)
-        ax2.plot(sub_s["t"], sub_s["survival_frac"], marker="o")
+        ax2.plot(sub_s["t"], sub_s["survival_frac"], marker="o", color="tab:green")
         ax2.set_xlabel("Frame")
-        ax2.set_ylabel("Survie")
+        ax2.set_ylabel("Survie (Fraction)")
         ax2.set_title(f"Survie — {cond}")
         ax2.set_ylim(0, 1.05)
+        ax2.grid(True, linestyle='--', alpha=0.6)
 
-        p2 = os.path.join(out_dir, f"survival_{cond}.png")
-        FigureCanvasAgg(fig2).print_png(p2)
-        saved.append(p2)
+        try:
+            fig2.savefig(os.path.join(out_dir, f"survival_{cond}.png"))
+        except: pass
+        
+        figures.append((f"Survie ({cond})", fig2))
 
-    return saved
+    return figures
 
 def get_interactive_charts(results):
     """
-    Génère des graphiques interactifs Plotly pour la prolifération et la survie.
-    Retourne une liste d'objets plotly.graph_objects.Figure.
+    Génère des graphiques Plotly PRO avec :
+    - Moyenne (Ligne)
+    - Erreur Standard SEM (Ombrage)
+    - Normalisation (Fold Change)
     """
     figures = []
     if results is None or results.empty:
         return figures
 
-    mean_prolif = results.groupby(["condition","t"])["n_cells"].mean().reset_index()
-    mean_surv = results.groupby(["condition","t"])["survival_frac"].mean().reset_index()
+    import plotly.graph_objects as go
 
-    # Graphique 1 : Prolifération (Toutes conditions)
-    fig_p = go.Figure()
-    for cond in results["condition"].unique():
-        sub = mean_prolif[mean_prolif["condition"] == cond]
-        fig_p.add_trace(go.Scatter(
-            x=sub["t"], y=sub["n_cells"],
-            mode='lines+markers',
-            name=f"Prolifération - {cond}"
+    # --- 1. PRÉPARATION DES DONNÉES ---
+    # On normalise la prolifération par fichier AVANT de moyenner
+    # Pour chaque fichier, on divise n_cells(t) par n_cells(0)
+    results = results.copy()
+    # On trouve le n_cells au temps min pour chaque fichier
+    def normalize_group(g):
+        n0 = g.loc[g["t"] == g["t"].min(), "n_cells"].iloc[0]
+        g["n_cells_norm"] = g["n_cells"] / max(1, n0) # Fold Change
+        return g
+
+    results = results.groupby(["condition", "file"]).apply(normalize_group).reset_index(drop=True)
+
+    # --- 2. CALCUL DES STATS (Moyenne et SEM) ---
+    # On groupe par Condition et Temps
+    stats = results.groupby(["condition", "t"]).agg(
+        n_mean=("n_cells", "mean"),
+        n_sem=("n_cells", "sem"),       # Erreur standard (nombre brut)
+        norm_mean=("n_cells_norm", "mean"),
+        norm_sem=("n_cells_norm", "sem"), # Erreur standard (normalisée)
+        surv_mean=("survival_frac", "mean"),
+        surv_sem=("survival_frac", "sem")
+    ).reset_index()
+
+    # Fonction utilitaire pour tracer une courbe avec ombrage (Intervalle de confiance)
+    def add_trace_with_error(fig, df_cond, x_col, y_mean_col, y_sem_col, label, color):
+        x = df_cond[x_col]
+        y = df_cond[y_mean_col]
+        y_upper = y + df_cond[y_sem_col].fillna(0)
+        y_lower = y - df_cond[y_sem_col].fillna(0)
+
+        # 1. Zone d'ombrage (Error Band)
+        fig.add_trace(go.Scatter(
+            x=pd.concat([x, x[::-1]]),
+            y=pd.concat([y_upper, y_lower[::-1]]),
+            fill='toself',
+            fillcolor=f"rgba({color}, 0.2)", # Opacité 20%
+            line=dict(color='rgba(255,255,255,0)'),
+            hoverinfo="skip",
+            showlegend=False,
+            name=f"{label} (SEM)"
         ))
+
+        # 2. Ligne Moyenne
+        fig.add_trace(go.Scatter(
+            x=x, y=y,
+            mode='lines+markers',
+            line=dict(color=f"rgb({color})", width=2),
+            name=label
+        ))
+
+    # Couleurs pour les conditions (Rouge, Bleu, Vert, Orange...)
+    colors = ["255,0,0", "0,128,255", "0,128,0", "255,128,0", "128,0,128"]
+    unique_conds = stats["condition"].unique()
+
+    # --- GRAPH 1 : PROLIFÉRATION NORMALISÉE (Fold Change) ---
+    fig_p = go.Figure()
+    for i, cond in enumerate(unique_conds):
+        sub = stats[stats["condition"] == cond]
+        color = colors[i % len(colors)]
+        add_trace_with_error(fig_p, sub, "t", "norm_mean", "norm_sem", cond, color)
+
     fig_p.update_layout(
-        title="Prolifération Cellulaire (Moyenne)",
+        title="Prolifération (Normalisée t0 = 1.0)",
         xaxis_title="Frame (t)",
-        yaxis_title="Nombre de cellules",
-        hovermode="x unified"
+        yaxis_title="Fold Change (N_t / N_0)",
+        hovermode="x unified",
+        template="plotly_white"
     )
     figures.append(fig_p)
 
-    # Graphique 2 : Survie (Toutes conditions)
+    # --- GRAPH 2 : SURVIE ---
     fig_s = go.Figure()
-    for cond in results["condition"].unique():
-        sub = mean_surv[mean_surv["condition"] == cond]
-        fig_s.add_trace(go.Scatter(
-            x=sub["t"], y=sub["survival_frac"],
-            mode='lines+markers',
-            name=f"Survie - {cond}"
-        ))
+    for i, cond in enumerate(unique_conds):
+        sub = stats[stats["condition"] == cond]
+        color = colors[i % len(colors)]
+        add_trace_with_error(fig_s, sub, "t", "surv_mean", "surv_sem", cond, color)
+
     fig_s.update_layout(
-        title="Taux de Survie (Moyenne)",
+        title="Taux de Survie",
         xaxis_title="Frame (t)",
         yaxis_title="Fraction de survie",
         yaxis=dict(range=[0, 1.05]),
-        hovermode="x unified"
+        hovermode="x unified",
+        template="plotly_white"
     )
     figures.append(fig_s)
+
+    # --- GRAPH 3 : NOMBRE BRUT (Pour info) ---
+    fig_raw = go.Figure()
+    for i, cond in enumerate(unique_conds):
+        sub = stats[stats["condition"] == cond]
+        color = colors[i % len(colors)]
+        add_trace_with_error(fig_raw, sub, "t", "n_mean", "n_sem", cond, color)
+    
+    fig_raw.update_layout(
+        title="Nombre de cellules (Brut)",
+        xaxis_title="Frame (t)",
+        yaxis_title="Nombre Absolu",
+        hovermode="x unified",
+        template="plotly_white"
+    )
+    figures.append(fig_raw)
 
     return figures
 
@@ -1062,3 +1149,80 @@ def recalculate_with_new_masks(path, new_masks, logger=None):
 
     if logger: logger("✅ Recalcul terminé.")
     return metrics, tracks
+
+def detect_mitosis_events(tracks, max_dist=35.0, relative_area_tol=0.5):
+    """
+    Détecte les événements de division (Mitose).
+    Critères :
+    - Une cellule Mère (M) disparaît à t.
+    - Deux cellules Filles (F1, F2) apparaissent à t+1.
+    - Distance(M, F1) < max_dist ET Distance(M, F2) < max_dist.
+    - Conservation de masse : Aire(M) ≈ Aire(F1) + Aire(F2) (à +/- tolérance).
+    
+    Retourne : DataFrame avec colonnes [t, mother_id, d1_id, d2_id, x_m, y_m]
+    """
+    events = []
+    
+    if tracks is None or tracks.empty:
+        return pd.DataFrame()
+
+    # Pré-calcul : pour chaque track, trouver son t_min (naissance) et t_max (mort)
+    track_stats = tracks.groupby("track_id")["t"].agg(["min", "max"])
+    
+    # On parcourt le temps
+    t_max_movie = tracks["t"].max()
+    
+    for t in range(tracks["t"].min(), t_max_movie):
+        # 1. Candidats Mères : tracks qui finissent exactement à t
+        dying_ids = track_stats[track_stats["max"] == t].index
+        if len(dying_ids) == 0: continue
+        
+        # 2. Candidats Filles : tracks qui commencent exactement à t+1
+        born_ids = track_stats[track_stats["min"] == (t + 1)].index
+        if len(born_ids) < 2: continue # Pas assez de naissances pour une division
+        
+        # Récupérer les données spatiales et aires
+        mothers = tracks[(tracks["t"] == t) & (tracks["track_id"].isin(dying_ids))]
+        daughters = tracks[(tracks["t"] == t + 1) & (tracks["track_id"].isin(born_ids))]
+        
+        if mothers.empty or daughters.empty: continue
+        
+        # Matrice de distance Mère vs Filles
+        coords_m = mothers[["x", "y"]].values
+        coords_d = daughters[["x", "y"]].values
+        
+        # On cherche les paires proches
+        from scipy.spatial.distance import cdist
+        dists = cdist(coords_m, coords_d)
+        
+        # Pour chaque mère, on cherche 2 filles
+        for i, m_id in enumerate(mothers["track_id"]):
+            # Indices des filles proches (< max_dist)
+            close_indices = np.where(dists[i] < max_dist)[0]
+            
+            if len(close_indices) >= 2:
+                # On a des candidats ! Vérifions l'aire
+                area_m = mothers.iloc[i]["area"]
+                
+                # On teste toutes les paires possibles parmi les voisines
+                from itertools import combinations
+                for idx1, idx2 in combinations(close_indices, 2):
+                    d1 = daughters.iloc[idx1]
+                    d2 = daughters.iloc[idx2]
+                    
+                    area_sum = d1["area"] + d2["area"]
+                    
+                    # Vérification tolérance aire (ex: la somme doit être entre 50% et 150% de la mère)
+                    if (1.0 - relative_area_tol) * area_m < area_sum < (1.0 + relative_area_tol) * area_m:
+                        # MITOSE TROUVÉE !
+                        events.append({
+                            "t": t,
+                            "mother_id": m_id,
+                            "daughter1_id": d1["track_id"],
+                            "daughter2_id": d2["track_id"],
+                            "x": mothers.iloc[i]["x"],
+                            "y": mothers.iloc[i]["y"]
+                        })
+                        break # On a trouvé les filles pour cette mère, on passe à la suivante
+
+    return pd.DataFrame(events)
