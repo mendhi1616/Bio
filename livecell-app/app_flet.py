@@ -557,76 +557,10 @@ def main(page: ft.Page):
             spinner.visible = False
             page.update()
 
-    def on_slider_change(e):
-        if isinstance(e.control.value, float):
-            e.control.label = f"{e.control.value:.3f}" if e.control.max < 10 else f"{e.control.value:.2f}"
-        else:
-            e.control.label = f"{int(e.control.value)}"
-        e.control.update()
-        debounce_preview()
-
-    sigma_slider = ft.Slider(
-        label=f"{ADV_PARAMS['sigma']:.2f}",
-        min=0.5, max=3.0, divisions=25,
-        value=ADV_PARAMS["sigma"],
-        on_change=on_slider_change
-    )
-    min_size_slider = ft.Slider(
-        label=f"{ADV_PARAMS['min_size']:.0f}",
-        min=5, max=500, divisions=99,
-        value=float(ADV_PARAMS["min_size"]),
-        on_change=on_slider_change
-    )
-    clahe_slider = ft.Slider(
-        label=f"{ADV_PARAMS['clahe_clip']:.3f}",
-        min=0.005, max=0.08, divisions=15,
-        value=ADV_PARAMS["clahe_clip"],
-        on_change=on_slider_change
-    )
-
-    deep_check = ft.Switch(
-        label="Amélioration profonde (Deep Enhance)",
-        value=False,
-        on_change=lambda e: debounce_preview()
-    )
-
     auto_preview_switch = ft.Switch(
         label="Aperçu automatique (ON/OFF)",
         value=True,
         on_change=lambda e: log("🧩 Aperçu automatique : " + ("activé" if e.control.value else "désactivé"))
-    )
-
-    def on_slider_change(e):
-        e.control.label = f"{e.control.value:.3f}" if isinstance(e.control.value, float) else f"{int(e.control.value)}"
-        e.control.update()
-        if auto_preview_switch.value:
-            debounce_preview()
-
-    sigma_text = ft.Text("Flou gaussien σ", width=180)
-    sigma_slider = ft.Slider(
-        min=0.5, max=3.0, divisions=25,
-        value=ADV_PARAMS["sigma"],
-        label=f"{ADV_PARAMS['sigma']:.2f}",
-        on_change=on_slider_change,
-        expand=True,
-    )
-
-    min_text = ft.Text("Taille minimale (px)", width=180)
-    min_size_slider = ft.Slider(
-        min=5, max=500, divisions=99,
-        value=float(ADV_PARAMS["min_size"]),
-        label=f"{ADV_PARAMS['min_size']:.0f}",
-        on_change=on_slider_change,
-        expand=True,
-    )
-
-    clahe_text = ft.Text("Contraste CLAHE", width=180)
-    clahe_slider = ft.Slider(
-        min=0.005, max=0.08, divisions=15,
-        value=ADV_PARAMS["clahe_clip"],
-        label=f"{ADV_PARAMS['clahe_clip']:.3f}",
-        on_change=on_slider_change,
-        expand=True,
     )
 
     def on_slider_change(e):
@@ -669,12 +603,6 @@ def main(page: ft.Page):
         label="Amélioration profonde (Deep Enhance)",
         value=False,
         on_change=lambda e: debounce_preview()
-    )
-
-    auto_preview_switch = ft.Switch(
-        label="Aperçu automatique (ON/OFF)",
-        value=True,
-        on_change=lambda e: log("🧩 Aperçu automatique : " + ("activé" if e.control.value else "désactivé"))
     )
 
     controls_panel = ft.Card(
