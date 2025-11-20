@@ -1020,34 +1020,41 @@ def main(page: ft.Page):
 
         def show_graphs(e):
             try:
-                # Feedback immédiat
-                page.snack_bar = ft.SnackBar(ft.Text("Génération des courbes en cours..."))
+                page.snack_bar = ft.SnackBar(ft.Text("Génération des graphiques..."))
                 page.snack_bar.open = True
                 page.update()
 
-                # Generate INTERACTIVE charts via Plotly
-                # This returns a list of ft.PlotlyChart controls (or we can create them here)
-                # For now, let's assume get_interactive_charts returns a list of plotly.graph_objects.Figure
-                from pipeline import get_interactive_charts
+                # On utilise plot_curves qui retourne maintenant des figures Matplotlib
+                from pipeline import plot_curves
 
-                figures = get_interactive_charts(GLOBAL_FULL_DF)
+                # Récupère les figures [(Titre, Fig), ...]
+                figs_data = plot_curves(GLOBAL_FULL_DF, out_dir=out_dir)
 
                 dlg_content = ft.Column(scroll=ft.ScrollMode.AUTO, height=600, width=900)
 
-                if not figures:
-                    dlg_content.controls.append(ft.Text("Aucun graphique généré. Vérifiez que l'analyse a produit des résultats.", color="red300"))
+                if not figs_data:
+                    dlg_content.controls.append(
+                        ft.Text("Aucune donnée à afficher. Lancez une analyse d'abord.", color="red")
+                    )
                 else:
-                    for fig in figures:
+                    # On affiche chaque figure dans une carte
+                    for title, fig in figs_data:
                         dlg_content.controls.append(
                             ft.Container(
-                                content=ft.PlotlyChart(fig, expand=False),
-                                height=400,
-                                padding=10
+                                content=ft.Column([
+                                    ft.Text(title, size=16, weight=ft.FontWeight.BOLD),
+                                    # Composant Flet pour afficher Matplotlib
+                                    ft.MatplotlibChart(fig, expand=False, original_size=True)
+                                ]),
+                                padding=10,
+                                border=ft.border.all(1, "grey"),
+                                border_radius=5,
+                                margin=5
                             )
                         )
 
                 dlg = ft.AlertDialog(
-                    title=ft.Text("Courbes Globales Interactives"),
+                    title=ft.Text("Résultats Graphiques"),
                     content=dlg_content,
                     actions=[ft.TextButton("Fermer", on_click=lambda _: page.close_dialog())],
                 )
@@ -1057,10 +1064,9 @@ def main(page: ft.Page):
 
             except Exception as ex:
                 log(f"[ERREUR] Affichage courbes : {ex}")
-                page.snack_bar = ft.SnackBar(ft.Text(f"Erreur: {ex}"))
-                page.snack_bar.open = True
-                page.update()
-
+                import traceback
+                log(traceback.format_exc())
+                
         # Comparison Dialog
         def show_comparison(e):
             files = list(GLOBAL_RESULTS.keys())
