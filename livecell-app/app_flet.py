@@ -219,7 +219,9 @@ class TrackViewer(ft.Container):
         img_base64 = base64.b64encode(buf).decode()
 
         self.img_display.src_base64 = img_base64
-        self.update()
+        # Only call update() if control is on page
+        if self.page:
+            self.update()
 
     def on_seek(self, e):
         self.t = int(self.slider.value)
@@ -290,6 +292,13 @@ def main(page: ft.Page):
     log_view = ft.ListView(expand=False, height=200, auto_scroll=True, spacing=4)
     conditions_panel = ft.Column()
     condition_checkboxes: Dict[str, List[ft.Checkbox]] = {}
+
+    # --- GLOBAL DATA STORES ---
+    # Stores for multiple files:
+    # {filename: {"tracks": df, "stack": np_array}}
+    GLOBAL_RESULTS = {}
+    # Full dataframe of all results (for global plots)
+    GLOBAL_FULL_DF = None
 
     global tracking_tab
     tracking_tab = None
@@ -697,16 +706,28 @@ def main(page: ft.Page):
 
 
     # ----------------------------------------------------------------------
+    # UTILITAIRES UI (définis hors de run_analysis pour éviter scope issues)
+    # ----------------------------------------------------------------------
+    def save_csv_callback(e, df):
+        if e.path and df is not None:
+             try:
+                df.to_csv(e.path, index=False)
+                log(f"[EXPORT] CSV sauvegardé : {e.path}")
+                page.snack_bar = ft.SnackBar(ft.Text(f"Sauvegardé : {e.path}"))
+                page.snack_bar.open = True
+                page.update()
+             except Exception as ex:
+                log(f"[ERREUR] Export CSV : {ex}")
+
+    # ----------------------------------------------------------------------
     # LANCEMENT DE L'ANALYSE
     # ----------------------------------------------------------------------
     def run_analysis(e=None):
+        nonlocal GLOBAL_RESULTS, GLOBAL_FULL_DF
         root = data_root.value.strip()
 
-        all_results = []
-        all_tracks = []
-
-        # We'll store the last processed stack here for visualization
-        last_stack = None
+        GLOBAL_RESULTS = {}
+        all_results_meta = []
 
         if not os.path.isdir(root):
             status.value = "Le dossier data/ est introuvable."
@@ -745,17 +766,23 @@ def main(page: ft.Page):
                 page.update()
 
                 try:
-                    # Now extracting stack as well
+                    fname = os.path.basename(pth)
                     metrics, tracks, current_stack = process_file(
                         pth, seg_method=method, logger=log, debug=True, fast_mode=use_fast
                     )
 
-                    last_stack = current_stack
-                    all_tracks.append(tracks)
-                    metrics["condition"] = cond
-                    all_results.append(metrics)
+                    # Store in global cache
+                    GLOBAL_RESULTS[fname] = {
+                        "tracks": tracks,
+                        "stack": current_stack,
+                        "condition": cond
+                    }
 
-                    log(f"OK: {os.path.basename(pth)}")
+                    # Append metrcis for plotting
+                    metrics["condition"] = cond
+                    all_results_meta.append(metrics)
+
+                    log(f"OK: {fname}")
 
                 except Exception as ex:
                     log(f"Erreur {os.path.basename(pth)} : {ex}")
@@ -768,190 +795,259 @@ def main(page: ft.Page):
         status.value = "Analyse terminée"
         page.update()
 
-        if not all_results:
+        if not all_results_meta:
             log("Aucun résultat.")
             return
 
-        results = pd.concat(all_results, ignore_index=True)
-        log(f"Résultats : {len(results)} lignes")
+        GLOBAL_FULL_DF = pd.concat(all_results_meta, ignore_index=True)
+        log(f"Résultats globaux : {len(GLOBAL_FULL_DF)} lignes de métriques.")
 
         # ----------------------------------------------------------------------
-        # TRACKING — AFFICHAGE TABLEAU
+        # TRACKING — SETUP UI with File Selector
         # ----------------------------------------------------------------------
         tracking_tab = tabs.tabs[2].content
         tracking_tab.controls.clear()
 
-        if not all_tracks or len(all_tracks) == 0:
-            log("[WARN] Aucun tracking détecté.")
-            tracking_tab.controls.append(
-                ft.Text("Aucune cellule suivie dans cette vidéo.", color="red300")
-            )
+        file_options = [ft.dropdown.Option(k) for k in GLOBAL_RESULTS.keys()]
+        if not file_options:
+            tracking_tab.controls.append(ft.Text("Aucune donnée valide.", color="red300"))
             tracking_tab.update()
             return
 
-        tracking_df = pd.concat(all_tracks, ignore_index=True).fillna(0)
+        # Default to first file
+        current_file_key = file_options[0].key
 
-        if tracking_df.shape[0] == 0:
-            log("[WARN] Tracking vide.")
-            tracking_tab.controls.append(
-                ft.Text("Aucune cellule suivie.", color="red300")
+        file_dropdown = ft.Dropdown(
+            label="Fichier à visualiser",
+            options=file_options,
+            value=current_file_key,
+            width=400,
+        )
+
+        # Containers for dynamic content
+        table_container = ft.Column(expand=True, scroll=ft.ScrollMode.AUTO)
+        actions_container = ft.Row()
+
+        def refresh_view(file_key):
+            table_container.controls.clear()
+            actions_container.controls.clear()
+
+            if not file_key or file_key not in GLOBAL_RESULTS:
+                return
+
+            data = GLOBAL_RESULTS[file_key]
+            df = data["tracks"]
+            stack = data["stack"]
+
+            if df is None or df.empty:
+                table_container.controls.append(ft.Text("Pas de tracking pour ce fichier.", color="red300"))
+                tracking_tab.update()
+                return
+
+            # --- TABLE GENERATION (Reused logic) ---
+            columns = [
+                "track_id", "t", "x", "y",
+                "speed_um_s", "cum_distance_um",
+                "area_um2", "circularity", "eccentricity",
+                "aspect_ratio", "solidity", "feret_max_um", "angle_deg", "straightness",
+            ]
+
+            # Pagination logic closure
+            rows_per_page = 50
+            current_page = [0]
+            total_rows = len(df)
+            total_pages = (total_rows + rows_per_page - 1) // rows_per_page
+
+            table = ft.DataTable(
+                columns=[ft.DataColumn(ft.Text(col)) for col in columns],
+                rows=[],
+                horizontal_margin=10,
+                column_spacing=20,
             )
+            page_info = ft.Text(f"Page 1 / {max(1, total_pages)}")
+
+            def update_table_rows():
+                start = current_page[0] * rows_per_page
+                end = start + rows_per_page
+                subset = df.iloc[start:end]
+                table.rows.clear()
+                for _, r in subset.iterrows():
+                    cells = []
+                    for col in columns:
+                        val = r.get(col, "")
+                        txt = str(val) if isinstance(val, str) else f"{val:.2f}"
+                        cells.append(ft.DataCell(ft.Text(txt)))
+                    table.rows.append(ft.DataRow(cells=cells))
+                page_info.value = f"Page {current_page[0] + 1} / {max(1, total_pages)}"
+                table.update()
+                page_info.update()
+
+            def prev_page(e):
+                if current_page[0] > 0:
+                    current_page[0] -= 1
+                    update_table_rows()
+
+            def next_page(e):
+                if current_page[0] < total_pages - 1:
+                    current_page[0] += 1
+                    update_table_rows()
+
+            controls_row = ft.Row(
+                [
+                    ft.IconButton(icon="arrow_back", on_click=prev_page),
+                    page_info,
+                    ft.IconButton(icon="arrow_forward", on_click=next_page),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER
+            )
+
+            update_table_rows() # Init
+            table_container.controls.append(controls_row)
+            table_container.controls.append(table)
+
+            # --- ACTIONS ---
+            def open_viewer_click(e):
+                if stack is None: return
+                viewer = TrackViewer(stack, df)
+                page.overlay.append(viewer)
+                page.update()
+
+            def export_current_csv(e):
+                save_file_picker.data = df # Pass df to picker via data or closure
+                save_file_picker.save_file(
+                    dialog_title=f"Sauvegarder {file_key}.csv",
+                    file_name=f"{file_key}_tracking.csv",
+                    allowed_extensions=["csv"]
+                )
+
+            # HACK: We attach the current DF to the picker in a closure or external ref
+            # Better: define specific handler
+            save_file_picker.on_result = lambda e: save_csv_callback(e, df)
+
+            actions_container.controls.extend([
+                ft.ElevatedButton("👁 Visualiser Track (TrackMate)", on_click=open_viewer_click, icon="remove_red_eye"),
+                ft.ElevatedButton("Export CSV (Fichier)", icon="download", on_click=export_current_csv, bgcolor="blue700", color="white")
+            ])
+
             tracking_tab.update()
-            return
 
-        # Colonnes affichées
-        columns = [
-            "track_id", "t", "x", "y",
-            "speed_um_s", "cum_distance_um",
-            "area_um2", "circularity", "eccentricity",
-            "aspect_ratio", "solidity",
-            "feret_max_um", "angle_deg", "straightness",
-        ]
+        def on_file_change(e):
+            refresh_view(file_dropdown.value)
 
-        # --- PAGINATED TABLE ---
-        rows_per_page = 50
-        current_page = [0]
-        total_rows = len(tracking_df)
-        total_pages = (total_rows + rows_per_page - 1) // rows_per_page
+        file_dropdown.on_change = on_file_change
 
-        table = ft.DataTable(
-            columns=[ft.DataColumn(ft.Text(col)) for col in columns],
-            rows=[],
-            horizontal_margin=10,
-            column_spacing=20,
-        )
+        # Initial render
+        refresh_view(current_file_key)
 
-        page_info = ft.Text(f"Page 1 / {max(1, total_pages)}")
-
-        def update_table():
-            start = current_page[0] * rows_per_page
-            end = start + rows_per_page
-            subset = tracking_df.iloc[start:end]
-
-            table.rows.clear()
-            for _, r in subset.iterrows():
-                cells = []
-                for col in columns:
-                    val = r[col]
-                    txt = str(val) if isinstance(val, str) else f"{val:.2f}"
-                    cells.append(ft.DataCell(ft.Text(txt)))
-                table.rows.append(ft.DataRow(cells=cells))
-
-            page_info.value = f"Page {current_page[0] + 1} / {max(1, total_pages)}"
-            tracking_tab.update()
-
-        def prev_page(e):
-            if current_page[0] > 0:
-                current_page[0] -= 1
-                update_table()
-
-        def next_page(e):
-            if current_page[0] < total_pages - 1:
-                current_page[0] += 1
-                update_table()
-
-        controls_row = ft.Row(
-            [
-                ft.IconButton(icon="arrow_back", on_click=prev_page),
-                page_info,
-                ft.IconButton(icon="arrow_forward", on_click=next_page),
-            ],
-            alignment=ft.MainAxisAlignment.CENTER
-        )
-
-        update_table()
-
-        # Injection dans l’onglet Tracking
-        tracking_tab.controls.append(controls_row)
-        tracking_tab.controls.append(ft.Column([table], scroll=ft.ScrollMode.AUTO, expand=True))
-
-        # --- ANALYSE / GRAPHIQUES (TrackMate style) ---
-        # On génère les graphes maintenant
+        # --- GLOBAL ACTIONS ---
         out_dir = os.path.join(root, "outputs")
-        saved_plots = plot_curves(results, out_dir=out_dir)
+        # Plot curves using GLOBAL_FULL_DF (all files metrics)
+        saved_plots = plot_curves(GLOBAL_FULL_DF, out_dir=out_dir)
 
         def show_graphs(e):
-            # Création d'un dialogue avec les images
             dlg_content = ft.Column(scroll=ft.ScrollMode.AUTO, height=600)
             if not saved_plots:
                 dlg_content.controls.append(ft.Text("Aucun graphique généré."))
             else:
                 for p_path in saved_plots:
-                    # Convertir le chemin local en objet Image ou base64 ?
-                    # Flet local path needs careful handling if web, but here local app.
-                    # On va lire l'image et la passer en base64 pour être sûr
                     if os.path.exists(p_path):
                          with open(p_path, "rb") as f:
                              b64 = base64.b64encode(f.read()).decode("utf-8")
                          dlg_content.controls.append(
                              ft.Image(src_base64=b64, width=600, fit=ft.ImageFit.CONTAIN)
                          )
-
             dlg = ft.AlertDialog(
-                title=ft.Text("Visualisation : Prolifération & Survie"),
+                title=ft.Text("Courbes Globales (Prolifération & Survie)"),
                 content=dlg_content,
-                actions=[
-                    ft.TextButton("Fermer", on_click=lambda _: page.close_dialog())
-                ],
+                actions=[ft.TextButton("Fermer", on_click=lambda _: page.close_dialog())],
             )
             page.dialog = dlg
             dlg.open = True
             page.update()
 
-
-        def open_track_viewer(e):
-            if last_stack is None:
-                log("[ERREUR] Pas d'image disponible pour la visualisation.")
+        # Comparison Dialog
+        def show_comparison(e):
+            files = list(GLOBAL_RESULTS.keys())
+            if len(files) < 2:
+                page.snack_bar = ft.SnackBar(ft.Text("Il faut au moins 2 fichiers pour comparer."))
+                page.snack_bar.open = True
+                page.update()
                 return
-            viewer = TrackViewer(last_stack, tracking_df)
-            page.overlay.append(viewer)
+
+            dd1 = ft.Dropdown(options=[ft.dropdown.Option(f) for f in files], value=files[0], label="Fichier A", expand=True)
+            dd2 = ft.Dropdown(options=[ft.dropdown.Option(f) for f in files], value=files[1] if len(files)>1 else files[0], label="Fichier B", expand=True)
+            result_area = ft.Column()
+
+            def compute_comp(e):
+                f1, f2 = dd1.value, dd2.value
+                if not f1 or not f2: return
+
+                df1 = GLOBAL_RESULTS[f1]["tracks"]
+                df2 = GLOBAL_RESULTS[f2]["tracks"]
+
+                # Simple Stats
+                # Avoid crash if empty
+                if df1.empty or df2.empty:
+                    result_area.controls = [ft.Text("Données vides pour l'un des fichiers.")]
+                    result_area.update()
+                    return
+
+                s1_speed = df1["speed_um_s"].mean()
+                s2_speed = df2["speed_um_s"].mean()
+                count1 = df1["track_id"].nunique()
+                count2 = df2["track_id"].nunique()
+
+                # Last time point survival (approx)
+                t_max1 = df1["t"].max()
+                t_max2 = df2["t"].max()
+
+                txt = (
+                    f"**Comparaison**\n\n"
+                    f"**{f1}**:\n"
+                    f" - Cellules (total tracks): {count1}\n"
+                    f" - Vitesse moy: {s1_speed:.4f} µm/s\n"
+                    f" - Durée (frames): {t_max1}\n\n"
+                    f"**{f2}**:\n"
+                    f" - Cellules (total tracks): {count2}\n"
+                    f" - Vitesse moy: {s2_speed:.4f} µm/s\n"
+                    f" - Durée (frames): {t_max2}\n\n"
+                    f"**Delta** (A - B):\n"
+                    f" - Speed: {s1_speed - s2_speed:.4f}\n"
+                    f" - Cells: {count1 - count2}"
+                )
+                result_area.controls = [ft.Markdown(txt)]
+                result_area.update()
+
+            dlg = ft.AlertDialog(
+                title=ft.Text("Comparer deux résultats"),
+                content=ft.Container(
+                    content=ft.Column([
+                        ft.Row([dd1, dd2]),
+                        ft.ElevatedButton("Comparer", on_click=compute_comp),
+                        ft.Divider(),
+                        result_area
+                    ], height=400, width=500),
+                    padding=10
+                ),
+                actions=[ft.TextButton("Fermer", on_click=lambda _: page.close_dialog())]
+            )
+            page.dialog = dlg
+            dlg.open = True
             page.update()
 
-        actions_row = ft.Row(
-            [
-                ft.ElevatedButton("👁 Visualiser Track (TrackMate)", on_click=open_track_viewer, icon="remove_red_eye"),
-                ft.ElevatedButton("📈 Visualiser les Courbes", on_click=show_graphs, icon="show_chart"),
-            ],
-            alignment=ft.MainAxisAlignment.START
-        )
+        global_actions = ft.Row([
+             ft.ElevatedButton("📈 Visualiser les Courbes Globales", on_click=show_graphs, icon="show_chart"),
+             ft.ElevatedButton("⚖️ Comparer Résultats", on_click=show_comparison, icon="compare_arrows")
+        ])
 
-        tracking_tab.controls.append(ft.Container(height=10))
-        tracking_tab.controls.append(actions_row)
+        tracking_tab.controls.append(ft.Container(content=file_dropdown, padding=10))
+        tracking_tab.controls.append(ft.Container(content=global_actions, padding=5))
+        tracking_tab.controls.append(actions_container)
+        tracking_tab.controls.append(ft.Divider())
+        tracking_tab.controls.append(table_container)
         tracking_tab.update()
 
-        # Export CSV
-        def save_file_result(e: ft.FilePickerResultEvent):
-            if e.path:
-                try:
-                    tracking_df.to_csv(e.path, index=False)
-                    log(f"[EXPORT] CSV sauvegardé : {e.path}")
-                    page.snack_bar = ft.SnackBar(ft.Text(f"Sauvegardé : {e.path}"))
-                    page.snack_bar.open = True
-                    page.update()
-                except Exception as ex:
-                    log(f"[ERREUR] Export CSV : {ex}")
 
-        save_file_picker.on_result = save_file_result
-
-        def export_csv(e):
-            save_file_picker.save_file(
-                dialog_title="Sauvegarder le CSV",
-                file_name="tracking_results.csv",
-                allowed_extensions=["csv"]
-            )
-
-        export_button = ft.ElevatedButton(
-            "Export CSV",
-            icon=ft.Icon(name="download"),
-            on_click=export_csv,
-            bgcolor="blue700",
-            color="white",
-        )
-
-
-        tracking_tab.controls.append(ft.Container(height=10))
-        tracking_tab.controls.append(export_button)
-        tracking_tab.update()
 
 
 
