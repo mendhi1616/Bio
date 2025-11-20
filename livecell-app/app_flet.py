@@ -7,6 +7,7 @@ import sys
 import verify_env
 verify_env.check_and_install()
 import os, glob, threading
+import base64
 import flet as ft
 import pandas as pd
 from typing import Dict, List
@@ -160,16 +161,47 @@ class TrackViewer(ft.Container):
     # ---------------- FRAME UPDATE ----------------
     def update_frame(self):
         img = self.stack[self.t].copy()
-        
+        # Convert normalized float [0,1] to uint8 [0,255] if necessary for OpenCV
+        if img.dtype != 'uint8':
+             img = (img * 255).astype('uint8')
+
+        # Ensure image is RGB (or at least 3 channels) for colored drawing
         import cv2
-        df_t = self.df[self.df["t"] == self.t]
+        import numpy as np
+        if len(img.shape) == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+        # 1) DESSINER LES QUEUES (TAILS) : historique des positions jusqu'à t
+        # On filtre tout ce qui est <= t
+        history_df = self.df[self.df["t"] <= self.t]
+
+        # Pour chaque track_id présent à l'instant t
+        present_ids = self.df[self.df["t"] == self.t]["track_id"].unique()
         
+        for tid in present_ids:
+            # Récupérer le chemin complet de ce track jusqu'à t
+            track_path = history_df[history_df["track_id"] == tid].sort_values("t")
+
+            pts = []
+            for _, r in track_path.iterrows():
+                pts.append([int(r["x"]), int(r["y"])])
+
+            if len(pts) > 1:
+                # Dessiner la polyligne
+                pts_arr = np.array(pts, np.int32)
+                pts_arr = pts_arr.reshape((-1, 1, 2))
+                # Couleur aléatoire stable par ID ou fixe (ici jaune/orange style TrackMate)
+                # OpenCV utilise BGR -> (0, 255, 255) = Jaune
+                cv2.polylines(img, [pts_arr], isClosed=False, color=(0, 255, 255), thickness=2)
+
+        # 2) DESSINER LES POINTS COURANTS
+        df_t = self.df[self.df["t"] == self.t]
         for _, row in df_t.iterrows():
             x, y = int(row["x"]), int(row["y"])
             tid = int(row["track_id"])
             
-            # cercle sur la cellule
-            cv2.circle(img, (x, y), 6, (0,255,0), 2)
+            # cercle sur la cellule (Rose/Magenta style TrackMate : BGR -> 255, 0, 255)
+            cv2.circle(img, (x, y), 6, (255, 0, 255), 2)
             
             # ID
             cv2.putText(
@@ -178,7 +210,7 @@ class TrackViewer(ft.Container):
                 (x+8, y-8),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
-                (0,255,0),
+                (255, 0, 255),
                 1,
                 cv2.LINE_AA
             )
@@ -341,7 +373,9 @@ def main(page: ft.Page):
     spinner = ft.ProgressRing(width=40, height=40, visible=False, color="blue")
 
     fp = ft.FilePicker()
+    save_file_picker = ft.FilePicker()
     page.overlay.append(fp)
+    page.overlay.append(save_file_picker)
     picked_path_text = ft.Text("Aucun fichier chargé.")
     preview_file_path: str | None = None
 
@@ -770,48 +804,96 @@ def main(page: ft.Page):
             "feret_max_um", "angle_deg", "straightness",
         ]
 
-        # --- HEADER FIXE ---
-        header_table = ft.DataTable(
+        # --- PAGINATED TABLE ---
+        rows_per_page = 50
+        current_page = [0]
+        total_rows = len(tracking_df)
+        total_pages = (total_rows + rows_per_page - 1) // rows_per_page
+
+        table = ft.DataTable(
             columns=[ft.DataColumn(ft.Text(col)) for col in columns],
             rows=[],
             horizontal_margin=10,
             column_spacing=20,
         )
 
+        page_info = ft.Text(f"Page 1 / {max(1, total_pages)}")
 
-        # --- TABLE DES LIGNES ---
-        rows_table = ft.DataTable(
-            columns=[ft.DataColumn(ft.Container(width=0)) for col in columns],
-            rows=[
-                ft.DataRow(
-                    cells=[
-                        ft.DataCell(
-                            ft.Text(
-                                str(r[col])
-                                if isinstance(r[col], str)
-                                else f"{r[col]:.2f}"
-                            )
-                        )
-                        for col in columns
-                    ]
-                )
-                for _, r in tracking_df.iterrows()
+        def update_table():
+            start = current_page[0] * rows_per_page
+            end = start + rows_per_page
+            subset = tracking_df.iloc[start:end]
+
+            table.rows.clear()
+            for _, r in subset.iterrows():
+                cells = []
+                for col in columns:
+                    val = r[col]
+                    txt = str(val) if isinstance(val, str) else f"{val:.2f}"
+                    cells.append(ft.DataCell(ft.Text(txt)))
+                table.rows.append(ft.DataRow(cells=cells))
+
+            page_info.value = f"Page {current_page[0] + 1} / {max(1, total_pages)}"
+            tracking_tab.update()
+
+        def prev_page(e):
+            if current_page[0] > 0:
+                current_page[0] -= 1
+                update_table()
+
+        def next_page(e):
+            if current_page[0] < total_pages - 1:
+                current_page[0] += 1
+                update_table()
+
+        controls_row = ft.Row(
+            [
+                ft.IconButton(icon="arrow_back", on_click=prev_page),
+                page_info,
+                ft.IconButton(icon="arrow_forward", on_click=next_page),
             ],
-            horizontal_margin=10,
-            column_spacing=20,
+            alignment=ft.MainAxisAlignment.CENTER
         )
 
-        # --- SCROLL FIX compatible Flet < 0.19 ---
-        scroll_area = ft.Column(
-            controls=[rows_table],
-            expand=True,
-            scroll=ft.ScrollMode.ALWAYS,
-        )
+        update_table()
 
         # Injection dans l’onglet Tracking
-        tracking_tab.controls.append(header_table)
-        tracking_tab.controls.append(scroll_area)
-        tracking_tab.update()
+        tracking_tab.controls.append(controls_row)
+        tracking_tab.controls.append(ft.Column([table], scroll=ft.ScrollMode.AUTO, expand=True))
+
+        # --- ANALYSE / GRAPHIQUES (TrackMate style) ---
+        # On génère les graphes maintenant
+        out_dir = os.path.join(root, "outputs")
+        saved_plots = plot_curves(results, out_dir=out_dir)
+
+        def show_graphs(e):
+            # Création d'un dialogue avec les images
+            dlg_content = ft.Column(scroll=ft.ScrollMode.AUTO, height=600)
+            if not saved_plots:
+                dlg_content.controls.append(ft.Text("Aucun graphique généré."))
+            else:
+                for p_path in saved_plots:
+                    # Convertir le chemin local en objet Image ou base64 ?
+                    # Flet local path needs careful handling if web, but here local app.
+                    # On va lire l'image et la passer en base64 pour être sûr
+                    if os.path.exists(p_path):
+                         with open(p_path, "rb") as f:
+                             b64 = base64.b64encode(f.read()).decode("utf-8")
+                         dlg_content.controls.append(
+                             ft.Image(src_base64=b64, width=600, fit=ft.ImageFit.CONTAIN)
+                         )
+
+            dlg = ft.AlertDialog(
+                title=ft.Text("Visualisation : Prolifération & Survie"),
+                content=dlg_content,
+                actions=[
+                    ft.TextButton("Fermer", on_click=lambda _: page.close_dialog())
+                ],
+            )
+            page.dialog = dlg
+            dlg.open = True
+            page.update()
+
 
         def open_track_viewer(e):
             if last_stack is None:
@@ -821,14 +903,38 @@ def main(page: ft.Page):
             page.overlay.append(viewer)
             page.update()
 
-        view_btn = ft.TextButton("👁 Visualiser Track (Dernier Fichier)", on_click=open_track_viewer)
-        tracking_tab.controls.append(view_btn)
+        actions_row = ft.Row(
+            [
+                ft.ElevatedButton("👁 Visualiser Track (TrackMate)", on_click=open_track_viewer, icon="remove_red_eye"),
+                ft.ElevatedButton("📈 Visualiser les Courbes", on_click=show_graphs, icon="show_chart"),
+            ],
+            alignment=ft.MainAxisAlignment.START
+        )
+
+        tracking_tab.controls.append(ft.Container(height=10))
+        tracking_tab.controls.append(actions_row)
+        tracking_tab.update()
 
         # Export CSV
+        def save_file_result(e: ft.FilePickerResultEvent):
+            if e.path:
+                try:
+                    tracking_df.to_csv(e.path, index=False)
+                    log(f"[EXPORT] CSV sauvegardé : {e.path}")
+                    page.snack_bar = ft.SnackBar(ft.Text(f"Sauvegardé : {e.path}"))
+                    page.snack_bar.open = True
+                    page.update()
+                except Exception as ex:
+                    log(f"[ERREUR] Export CSV : {ex}")
+
+        save_file_picker.on_result = save_file_result
+
         def export_csv(e):
-            out_path = os.path.join(root, "tracking_results.csv")
-            tracking_df.to_csv(out_path, index=False)
-            log(f"[EXPORT] CSV sauvegardé : {out_path}")
+            save_file_picker.save_file(
+                dialog_title="Sauvegarder le CSV",
+                file_name="tracking_results.csv",
+                allowed_extensions=["csv"]
+            )
 
         export_button = ft.ElevatedButton(
             "Export CSV",
