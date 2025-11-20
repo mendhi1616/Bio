@@ -217,13 +217,23 @@ class TrackViewer(ft.Container):
                 cv2.polylines(img, [pts_arr], isClosed=False, color=(0, 255, 255), thickness=2)
 
         # 3) DESSINER LES POINTS COURANTS
+        # Highlight "New" cells (born this frame) in CYAN to help see mitosis/birth
+        track_starts = self.df.groupby("track_id")["t"].min()
+
         df_t = self.df[self.df["t"] == self.t]
         for _, row in df_t.iterrows():
             x, y = int(row["x"]), int(row["y"])
             tid = int(row["track_id"])
             
-            # cercle sur la cellule (Rose/Magenta style TrackMate : BGR -> 255, 0, 255)
-            cv2.circle(img, (x, y), 4, (255, 0, 255), 2)
+            # Check age
+            t_start = track_starts.get(tid, 0)
+            age = self.t - t_start
+
+            # Color: Cyan (255, 255, 0) if new (age < 2), else Magenta (255, 0, 255)
+            color = (255, 255, 0) if age < 2 else (255, 0, 255)
+
+            # cercle sur la cellule
+            cv2.circle(img, (x, y), 4, color, 2)
             
             # ID
             cv2.putText(
@@ -232,7 +242,7 @@ class TrackViewer(ft.Container):
                 (x+8, y-8),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.4,
-                (255, 0, 255),
+                color,
                 1,
                 cv2.LINE_AA
             )
@@ -254,14 +264,15 @@ class TrackViewer(ft.Container):
         self.play_btn.text = "⏸" if self.playing else "▶"
         self.update()
         if self.playing:
-            asyncio.create_task(self.autoplay())
+            threading.Thread(target=self.autoplay_loop, daemon=True).start()
 
-    async def autoplay(self):
+    def autoplay_loop(self):
+        import time
         while self.playing:
             self.t = (self.t + 1) % len(self.stack)
             self.slider.value = self.t
             self.update_frame()
-            await asyncio.sleep(0.05)
+            time.sleep(0.05)
 
     def close(self, e):
         self.visible = False
