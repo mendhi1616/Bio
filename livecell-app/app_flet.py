@@ -901,9 +901,12 @@ def main(page: ft.Page):
                 alignment=ft.MainAxisAlignment.CENTER
             )
 
-            update_table_rows() # Init
             table_container.controls.append(controls_row)
             table_container.controls.append(table)
+            tracking_tab.update()
+
+            # Now render rows after table is on page
+            update_table_rows()
 
             # --- ACTIONS ---
             def open_viewer_click(e):
@@ -928,8 +931,7 @@ def main(page: ft.Page):
                 ft.ElevatedButton("👁 Visualiser Track (TrackMate)", on_click=open_viewer_click, icon="remove_red_eye"),
                 ft.ElevatedButton("Export CSV (Fichier)", icon="download", on_click=export_current_csv, bgcolor="blue700", color="white")
             ])
-
-            tracking_tab.update()
+            actions_container.update()
 
         def on_file_change(e):
             refresh_view(file_dropdown.value)
