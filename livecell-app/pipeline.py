@@ -121,92 +121,111 @@ from cellpose.models import CellposeModel
 GLOBAL_MODEL = None
 
 def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=False):
+    import traceback # Nécessaire pour afficher les détails du crash
     t0 = time.time()
 
     if logger:
         logger(f"➡️ Fichier: {os.path.basename(path)} — méthode={seg_method} — fast={fast_mode}")
 
-    # --- Charger stack ---
-    stack = _load_stack(path, logger=logger)
+    try:
+        # --- Charger stack ---
+        stack = _load_stack(path, logger=logger)
 
-    # --- Lire métadonnées (pixel_size, dt) ---
-    pixel_size, dt = _read_metadata(path, logger=logger)
-    if pixel_size is None:
-        pixel_size = 0.1
-    if dt is None:
-        dt = 60.0
+        # --- Lire métadonnées (pixel_size, dt) ---
+        pixel_size, dt = _read_metadata(path, logger=logger)
+        if pixel_size is None:
+            pixel_size = 0.1
+        if dt is None:
+            dt = 60.0
 
-    # --- FAST MODE : 1 frame sur 2 ---
-    if fast_mode:
-        if logger: logger("⚡ Mode Rapide activé : traitement de 1 frame sur 2.")
-        stack = stack[::2]
-        dt *= 2.0
+        # --- FAST MODE : 1 frame sur 2 ---
+        if fast_mode:
+            if logger: logger("⚡ Mode Rapide activé : traitement de 1 frame sur 2.")
+            stack = stack[::2]
+            dt *= 2.0
 
-    # --- Choix méthode ---
-    if seg_method == "auto":
-        method = "cellpose" if CELLPOSE_OK else "gam"
-    else:
-        method = seg_method
+        # --- Choix méthode ---
+        if seg_method == "auto":
+            method = "cellpose" if CELLPOSE_OK else "gam"
+        else:
+            method = seg_method
 
-    # --- GPU ---
-    use_gpu = torch.cuda.is_available()
+        # --- GPU ---
+        use_gpu = torch.cuda.is_available()
 
-    # --- Init modèle cellpose (une seule fois) ---
-    global GLOBAL_MODEL
-    if method == "cellpose" and GLOBAL_MODEL is None:
-        if logger: logger("[INFO] Initialisation du modèle Cellpose…")
-        GLOBAL_MODEL = CellposeModel(gpu=use_gpu)
+        # --- Init modèle cellpose (une seule fois) ---
+        global GLOBAL_MODEL
+        if method == "cellpose" and GLOBAL_MODEL is None:
+            if logger: logger("[INFO] Initialisation du modèle Cellpose…")
+            GLOBAL_MODEL = CellposeModel(gpu=use_gpu)
 
-    # --- Segmentation ---
-    labels_list = _segment_stack(
-        stack,
-        method=method,
-        logger=logger,
-        sigma=ADV_PARAMS["sigma"],
-        min_size=ADV_PARAMS["min_size"],
-        max_size=ADV_PARAMS["max_size"],
-        clahe_clip=ADV_PARAMS["clahe_clip"],
-        edge_margin=ADV_PARAMS["edge_margin"],
-        deep_enhance=ADV_PARAMS["deep_enhance"],
-    )
+        # --- Segmentation ---
+        labels_list = _segment_stack(
+            stack,
+            method=method,
+            logger=logger,
+            sigma=ADV_PARAMS["sigma"],
+            min_size=ADV_PARAMS["min_size"],
+            max_size=ADV_PARAMS["max_size"],
+            clahe_clip=ADV_PARAMS["clahe_clip"],
+            edge_margin=ADV_PARAMS["edge_margin"],
+            deep_enhance=ADV_PARAMS["deep_enhance"],
+        )
 
-    # --- Tracking ---
-    tracks = _track_labels(labels_list, max_dist=20.0, logger=logger)
+        # --- Tracking ---
+        tracks = _track_labels(labels_list, max_dist=20.0, logger=logger)
 
-    if tracks is None or len(tracks) == 0:
-        if logger:
-            logger("[WARN] Tracking vide.")
-        # >>> NO EARLY RETURN <<<
-        metrics = pd.DataFrame({"file": [os.path.basename(path)]})
-        return metrics, pd.DataFrame()
+        if tracks is None or len(tracks) == 0:
+            if logger:
+                logger("[WARN] Tracking vide.")
+            
+            metrics = pd.DataFrame({"file": [os.path.basename(path)]})
+            # --- CORRECTION 1 : On retourne 4 valeurs pour ne pas casser app_flet.py ---
+            return metrics, pd.DataFrame(), stack, labels_list
 
-    # --- Motion features ---
-    tracks = compute_motion_features(tracks, pixel_size, dt)
+        # --- Motion features ---
+        tracks = compute_motion_features(tracks, pixel_size, dt)
 
-    # --- Metrics ---
-    metrics = _metrics_from_tracks(tracks)
-    metrics["file"] = os.path.basename(path)
+        # --- Metrics ---
+        metrics = _metrics_from_tracks(tracks)
+        metrics["file"] = os.path.basename(path)
 
-    # --- Debug overlay ---
-    if debug:
-        out_dir = os.path.join(os.path.dirname(path), "outputs")
-        os.makedirs(out_dir, exist_ok=True)
+        # --- Debug overlay ---
+        if debug:
+            try:
+                out_dir = os.path.join(os.path.dirname(path), "outputs")
+                os.makedirs(out_dir, exist_ok=True)
 
-        overlay_path = os.path.join(out_dir, "overlay_" + os.path.basename(path) + ".png")
-        mid = len(stack) // 2
+                overlay_path = os.path.join(out_dir, "overlay_" + os.path.basename(path) + ".png")
+                
+                mid = len(stack) // 2
 
-        fig, ax = plt.subplots()
-        ax.imshow(stack[mid], cmap="gray")
-        ax.contour(labels_list[mid], colors="lime", linewidths=0.9)
-        ax.axis("off")
-        fig.savefig(overlay_path, dpi=160, bbox_inches="tight")
-        plt.close(fig)
+                # --- CORRECTION 2 : Sécurité Index Overlay ---
+                if mid < len(labels_list):
+                    fig, ax = plt.subplots()
+                    ax.imshow(stack[mid], cmap="gray")
+                    ax.contour(labels_list[mid], colors="lime", linewidths=0.9)
+                    ax.axis("off")
+                    fig.savefig(overlay_path, dpi=160, bbox_inches="tight")
+                    plt.close(fig)
 
-        if logger:
-            logger(f"🖼 Overlay sauvegardé : {overlay_path}")
+                    if logger:
+                        logger(f"🖼 Overlay sauvegardé : {overlay_path}")
+                else:
+                    if logger: logger(f"[WARN] Overlay ignoré : index {mid} hors limites (stack={len(stack)}, masques={len(labels_list)})")
 
-    # --- FIN ---
-    return metrics, tracks, stack, labels_list
+            except Exception as e_img:
+                if logger: logger(f"[WARN] Erreur génération image debug : {e_img}")
+
+        # --- FIN ---
+        return metrics, tracks, stack, labels_list
+
+    except Exception as e:
+        # --- CORRECTION 3 : Gestion globale des crashs ---
+        if logger: 
+            logger(f"[CRASH] Erreur critique dans process_file: {e}")
+            logger(traceback.format_exc()) # Affiche la ligne exacte de l'erreur
+        raise e
 
 
 def lap_match(prev_df, next_df, max_dist=25.0):
@@ -399,72 +418,102 @@ def _segment_frame_gam(img, sigma=1.6, min_size=1200, max_size=120000,
     return measure.label(out)
 
 def _segment_stack(stack, method="gam", logger=None, **kwargs):
+    import cv2
+    import logging
+    # On fait taire les warnings de Cellpose
+    logging.getLogger("cellpose").setLevel(logging.ERROR)
+
     labels_list = []
 
     if logger:
         logger(f"  ↳ Segmentation: méthode = {method}")
 
-    # ----- Mode auto -----
     if method == "auto":
         method = "cellpose" if CELLPOSE_OK else "gam"
 
-    # ----- Mode Cellpose v4 (Batch Processing) -----
+    # =========================================================
+    # MODE CELLPOSE (Optimisé : 75% de la taille)
+    # =========================================================
     if method == "cellpose" and CELLPOSE_OK:
         global GLOBAL_MODEL
         use_gpu = torch.cuda.is_available() if TORCH_OK else False
-
+        
         if GLOBAL_MODEL is None:
-            if logger: logger("[INFO] Initialisation du modèle Cellpose…")
+            if logger: logger(f"[INFO] Init Cellpose (GPU={use_gpu})")
             GLOBAL_MODEL = CellposeModel(gpu=use_gpu)
 
-        if logger:
-            logger(f"[INFO] Segmentation Cellpose (Batch) - GPU={use_gpu}")
-
-        # Prepare stack for batch processing
-        # Normalize if not already done (stack is usually float [0,1] from _load_stack)
-        # Cellpose expects list of arrays or single 3D array (frames, Y, X)
-        # We pass the stack directly.
-
         try:
-            # Run evaluation in batch
-            # batch_size 8 is conservative to avoid OOM, can increase if needed
-            masks_3d = GLOBAL_MODEL.eval(
-                stack,
-                batch_size=8,
-                channels=[0, 0],
-                diameter=30.0, # Ensure default diameter or pass it
-                do_3D=False
-            )
+            h, w = stack.shape[-2:]
+            
+            # --- REGLAGE DU SCALE ---
+            # Si l'image est grande (>800px), on la réduit à 75% (0.75)
+            # Sinon on garde 100% (1.0) pour ne pas perdre de détails sur les petites images
+            scale = 0.75 if (h > 800 or w > 800) else 1.0
+            
+            # On adapte le diamètre moyen (30px par défaut) à cette réduction
+            diam = 30.0 * scale
 
-            # Handle return format (can vary by version)
-            if isinstance(masks_3d, tuple) or isinstance(masks_3d, list):
-                masks_3d = masks_3d[0] # masks is first element
+            if logger and scale != 1.0: 
+                logger(f"    ⚡ Turbo activé: Analyse à {int(scale*100)}% de la taille")
 
-            if isinstance(masks_3d, list):
-                 # Convert list of 2D arrays to 3D array or list of 2D
-                 labels_list = masks_3d
-            else:
-                 # Assuming numpy array (T, Y, X)
-                 labels_list = [masks_3d[i] for i in range(masks_3d.shape[0])]
+            # 1. PREPARATION RAPIDE
+            inputs = [
+                cv2.resize(img, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA) 
+                if scale != 1.0 else img
+                for img in stack
+            ]
 
-            if logger:
-                logger(f"    • Cellpose Batch terminé ({len(labels_list)} frames)")
+            # 2. BATCH PROCESSING
+            chunk_size = 50
+            
+            for i in range(0, len(inputs), chunk_size):
+                batch = inputs[i : i + chunk_size]
+                
+                if logger: 
+                    logger(f"    ... Cellpose: {i+1}-{min(i+chunk_size, len(inputs))}/{len(inputs)}")
+
+                # Inference
+                res = GLOBAL_MODEL.eval(
+                    batch, 
+                    batch_size=16, 
+                    channels=[0,0], 
+                    diameter=diam, 
+                    do_3D=False
+                )
+                
+                # Extraction propre
+                masks = res[0] if isinstance(res, tuple) else res
+                masks = masks if isinstance(masks, list) else [masks[k] for k in range(masks.shape[0])]
+
+                # 3. UPSAMPLING (Remettre à la taille originale)
+                if scale != 1.0:
+                    resized = [
+                        cv2.resize(m.astype(np.int32), (w, h), interpolation=cv2.INTER_NEAREST) 
+                        for m in masks
+                    ]
+                    labels_list.extend(resized)
+                else:
+                    labels_list.extend(masks)
+                
+                if use_gpu: torch.cuda.empty_cache()
+
+            if logger: logger(f"    • Terminé : {len(labels_list)} frames.")
+            return labels_list
 
         except Exception as e:
-            if logger: logger(f"[ERREUR] Batch Cellpose échoué ({e}) — fallback frame-by-frame.")
-            # Fallback loop
-            for t, frame in enumerate(stack):
-                labels = _segment_frame_cellpose(frame, logger=logger)
-                labels_list.append(labels)
-                if logger and t % 10 == 0: logger(f"    • Frame {t} (fallback)")
+            if logger: logger(f"[ERREUR] Batch échoué ({e}) -> Fallback.")
+            labels_list = []
+            for frame in stack:
+                labels_list.append(_segment_frame_cellpose(frame, logger=None))
+            return labels_list
 
-        return labels_list
-
-    # ----- Mode GAM++ -----
+    # =========================================================
+    # MODE GAM++ (Classique)
+    # =========================================================
     deep = kwargs.get("deep_enhance", ADV_PARAMS["deep_enhance"])
-
+    
     for t, frame in enumerate(stack):
-        labels = _segment_frame_gam(
+        labels_list.append(_segment_frame_gam(
             frame,
             sigma=kwargs.get("sigma", ADV_PARAMS["sigma"]),
             min_size=kwargs.get("min_size", ADV_PARAMS["min_size"]),
@@ -472,12 +521,8 @@ def _segment_stack(stack, method="gam", logger=None, **kwargs):
             clahe_clip=kwargs.get("clahe_clip", ADV_PARAMS["clahe_clip"]),
             edge_margin=kwargs.get("edge_margin", ADV_PARAMS["edge_margin"]),
             deep_enhance=deep,
-        )
-
-        labels_list.append(labels)
-
-        if logger and (t % 10 == 0 or t == len(stack) - 1):
-            logger(f"    • Frames segmentées: {t+1}/{len(stack)}")
+        ))
+        if logger and t % 10 == 0: logger(f"    • GAM++: {t+1}/{len(stack)}")
 
     return labels_list
 
@@ -540,6 +585,13 @@ def _track_labels(labels_list, max_dist=15.0, logger=None, gap_frames=2):
 
     next_track_id = 1
 
+    # Colonnes qu'on veut garder dans le résultat final
+    cols_to_keep = [
+        "t", "label", "x", "y", "area", "perimeter",
+        "eccentricity", "major_axis_length", "minor_axis_length",
+        "solidity", "feret_diameter_max", "track_id"
+    ]
+
     # -----------------------
     # PASS 1 : LAP frame-to-frame
     # -----------------------
@@ -549,23 +601,33 @@ def _track_labels(labels_list, max_dist=15.0, logger=None, gap_frames=2):
         df["t"] = t
         df.index = pd.Index([f"t{t}_l{int(x)}" for x in df["label"]], name="obj")
 
+        # --- CAS 1 : PREMIÈRE FRAME ---
         if prev is None:
             df["track_id"] = range(next_track_id, next_track_id + len(df))
             for _, row in df.iterrows():
                 track_end[row["track_id"]] = (row["x"], row["y"], t)
             next_track_id += len(df)
+            
+            # CORRECTION IMPORTANTE : On sauvegarde la frame 0 !
+            if not df.empty:
+                tracks.append(df[cols_to_keep])
+
             prev = df
             continue
 
-        # Hungarian cost matrix
-        cost = cdist(prev[["x", "y"]], df[["x", "y"]])
-        cost[cost > max_dist] = 1e9
-
-        rows, cols = linear_sum_assignment(cost)
+        # --- CAS 2 : FRAMES SUIVANTES ---
+        # Matrice de coût (Distance)
+        if len(prev) > 0 and len(df) > 0:
+            cost = cdist(prev[["x", "y"]], df[["x", "y"]])
+            cost[cost > max_dist] = 1e9
+            rows, cols = linear_sum_assignment(cost)
+        else:
+            rows, cols = [], []
 
         track_id = pd.Series(np.nan, index=df.index)
         used = set()
 
+        # Assignation des IDs existants via LAP
         for r, c in zip(rows, cols):
             if cost[r, c] < 1e9:
                 p_obj = prev.index[r]
@@ -576,7 +638,7 @@ def _track_labels(labels_list, max_dist=15.0, logger=None, gap_frames=2):
                 used.add(c_obj)
                 track_end[tid] = (df.loc[c_obj, "x"], df.loc[c_obj, "y"], t)
 
-        # unassigned new objects → pending_start
+        # Nouveaux objets (non assignés) → pending_start
         for obj in df.index:
             if obj not in used:
                 new_tid = next_track_id
@@ -587,20 +649,9 @@ def _track_labels(labels_list, max_dist=15.0, logger=None, gap_frames=2):
 
         df["track_id"] = track_id.values
 
-        tracks.append(df[[
-            "t",
-            "label",
-            "x",
-            "y",
-            "area",
-            "perimeter",
-            "eccentricity",
-            "major_axis_length",
-            "minor_axis_length",
-            "solidity",
-            "feret_diameter_max",
-            "track_id",
-        ]])
+        # Sauvegarde de la frame courante
+        if not df.empty:
+            tracks.append(df[cols_to_keep])
 
         prev = df
 
@@ -615,30 +666,41 @@ def _track_labels(labels_list, max_dist=15.0, logger=None, gap_frames=2):
     if logger:
         logger("  ↳ Gap closing…")
 
-    for obj, (x2, y2, t2, new_tid) in list(pending_start.items()):
-        # Try to reconnect to an older track
-        best_tid = None
-        best_dist = 9999
+    # On ne lance le gap closing que s'il y a des données en attente et des tracks
+    if pending_start and tracks:
+        for obj, (x2, y2, t2, new_tid) in list(pending_start.items()):
+            # Try to reconnect to an older track
+            best_tid = None
+            best_dist = 9999
 
-        for tid, (x1, y1, t1) in track_end.items():
+            for tid, (x1, y1, t1) in track_end.items():
+                # On cherche dans le passé (t2 - t1 doit être <= gap_frames)
+                if 1 <= (t2 - t1) <= gap_frames:
+                    dist = np.hypot(x2 - x1, y2 - y1)
+                    if dist < max_dist and dist < best_dist:
+                        best_tid = tid
+                        best_dist = dist
 
-            if 1 <= (t2 - t1) <= gap_frames:
-                dist = np.hypot(x2 - x1, y2 - y1)
-                if dist < max_dist and dist < best_dist:
-                    best_tid = tid
-                    best_dist = dist
-
-        # reconnect
-        if best_tid is not None:
-            for df in tracks:
-                df.loc[df["track_id"] == new_tid, "track_id"] = best_tid
-            if logger:
-                logger(f"    ↳ Gap closing : track {new_tid} → {best_tid}")
+            # Reconnect : mise à jour rétroactive des IDs
+            if best_tid is not None:
+                for df_track in tracks:
+                    mask = df_track["track_id"] == new_tid
+                    if mask.any():
+                        df_track.loc[mask, "track_id"] = best_tid
+                
+                if logger:
+                    logger(f"    ↳ Gap closing : track {new_tid} → {best_tid}")
 
     # -----------------------
-    # Résultat final
+    # Résultat final (SÉCURISÉ)
     # -----------------------
-    out = pd.concat(tracks).reset_index()
+    
+    # SÉCURITÉ CRITIQUE : Si tracks est vide, on renvoie un DF vide structuré
+    if not tracks:
+        if logger: logger("[WARN] Aucune cellule suivie détectée.")
+        return pd.DataFrame(columns=cols_to_keep)
+
+    out = pd.concat(tracks).reset_index(drop=True)
     return out
 
 def compute_motion_features(tracks, pixel_size, dt):

@@ -828,7 +828,7 @@ def main(page: ft.Page):
                 try:
                     fname = os.path.basename(pth)
                     metrics, tracks, current_stack, current_masks = process_file(
-                        pth, seg_method=method, logger=log, debug=True, fast_mode=use_fast
+                        pth, seg_method=method, logger=log, debug=False, fast_mode=use_fast
                     )
 
                     # Store in global cache
@@ -1130,12 +1130,18 @@ def main(page: ft.Page):
             dlg.open = True
             page.update()
 
-        # Napari Bridge Function
+
+# Napari Bridge Function
         def open_napari_viewer(e):
+            import numpy as np
+            import tifffile
+            import subprocess
+            import sys
+            import os
+
             files = list(GLOBAL_RESULTS.keys())
             if not files: return
 
-            # Use currently selected file if possible
             key = file_dropdown.value if file_dropdown.value else files[0]
             data = GLOBAL_RESULTS[key]
             stack = data["stack"]
@@ -1145,32 +1151,22 @@ def main(page: ft.Page):
             page.snack_bar.open = True
             page.update()
 
-            # Run in separate process to avoid blocking Flet loop
-            import multiprocessing
-            # Need to define target function at module level to be picklable on Windows
-            # or use a helper script. For simplicity, we'll use a thread here but napari needs main thread usually.
-            # Actually, Napari + Flet in same process is risky.
-            # Best approach: save data to temp file and launch a subprocess script.
-
-            import tifffile
-            import subprocess
-            import sys
-
             temp_dir = os.path.join(root, "temp_napari")
             os.makedirs(temp_dir, exist_ok=True)
 
             img_path = os.path.join(temp_dir, "img.tif")
             lbl_path = os.path.join(temp_dir, "labels.tif")
 
+            # Sauvegarde
             tifffile.imwrite(img_path, stack)
             if masks is not None:
-                # masks is list of 2D arrays, stack them
                 lbl_stack = np.array(masks, dtype=np.int32)
                 tifffile.imwrite(lbl_path, lbl_stack)
             else:
                 if os.path.exists(lbl_path): os.remove(lbl_path)
 
-            # Launch script
+            # --- SCRIPT GÉNÉRÉ ---
+            # On force ndisplay=2 pour dire "C'est de la 2D + Temps, pas de la 3D volumétrique"
             script_code = f"""
 import napari
 import tifffile
@@ -1178,10 +1174,17 @@ import os
 
 def view():
     viewer = napari.Viewer()
+    
+    # FORCE LE MODE 2D (Empêche le crash IndexError)
+    viewer.dims.ndisplay = 2
+
+    # Chargement Image
     if os.path.exists(r'{img_path}'):
         img = tifffile.imread(r'{img_path}')
+        # On précise que c'est une Time-series (pas indispensable mais plus propre)
         viewer.add_image(img, name='Image')
 
+    # Chargement Masques
     if os.path.exists(r'{lbl_path}'):
         lbl = tifffile.imread(r'{lbl_path}')
         viewer.add_labels(lbl, name='Masks')
@@ -1192,11 +1195,10 @@ if __name__ == '__main__':
     view()
 """
             script_path = os.path.join(temp_dir, "launch_napari.py")
-            with open(script_path, "w", encoding="utf-8") as f:
-                f.write(script_code)
+            with open(script_path, "w", encoding="utf-8") as f_script:
+                f_script.write(script_code)
 
             subprocess.Popen([sys.executable, script_path])
-
 
         global_actions = ft.Row([
              ft.ElevatedButton("📈 Courbes Interactives", on_click=show_graphs, icon="show_chart"),
