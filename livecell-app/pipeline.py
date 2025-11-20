@@ -205,7 +205,7 @@ def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=Fa
             logger(f"🖼 Overlay sauvegardé : {overlay_path}")
 
     # --- FIN ---
-    return metrics, tracks, stack
+    return metrics, tracks, stack, labels_list
 
 
 def lap_match(prev_df, next_df, max_dist=25.0):

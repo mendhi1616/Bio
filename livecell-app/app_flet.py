@@ -114,7 +114,7 @@ def check_and_register_on_start(username_hint=None, ui_notify=None):
 
 
 class TrackViewer(ft.Container):
-    def __init__(self, stack, tracking_df):
+    def __init__(self, stack, tracking_df, masks=None):
         super().__init__(
             bgcolor="black",
             padding=10,
@@ -123,6 +123,7 @@ class TrackViewer(ft.Container):
 
         self.stack = stack
         self.df = tracking_df
+        self.masks = masks
         self.t = 0
         self.playing = False
         
@@ -171,13 +172,34 @@ class TrackViewer(ft.Container):
         if len(img.shape) == 2:
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
-        # 1) DESSINER LES QUEUES (TAILS) : historique des positions jusqu'à t
+        # 1) DESSINER LES MASQUES (CONTOURS CELLPOSE) SI DISPONIBLES
+        if self.masks is not None and len(self.masks) > self.t:
+            mask = self.masks[self.t]
+            if mask is not None:
+                # Convert mask to contours
+                # Mask is int32, labels 0..N
+                # We want contours for each label
+                u_labels = np.unique(mask)
+                for lbl in u_labels:
+                    if lbl == 0: continue
+
+                    # Create binary mask for this label
+                    # uint8 for findContours
+                    bmask = (mask == lbl).astype(np.uint8)
+
+                    # Find contours
+                    contours, _ = cv2.findContours(bmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                    # Draw contours in Green (0, 255, 0)
+                    cv2.drawContours(img, contours, -1, (0, 255, 0), 1)
+
+        # 2) DESSINER LES QUEUES (TAILS) : historique des positions jusqu'à t
         # On filtre tout ce qui est <= t
         history_df = self.df[self.df["t"] <= self.t]
 
         # Pour chaque track_id présent à l'instant t
         present_ids = self.df[self.df["t"] == self.t]["track_id"].unique()
-        
+
         for tid in present_ids:
             # Récupérer le chemin complet de ce track jusqu'à t
             track_path = history_df[history_df["track_id"] == tid].sort_values("t")
@@ -194,14 +216,14 @@ class TrackViewer(ft.Container):
                 # OpenCV utilise BGR -> (0, 255, 255) = Jaune
                 cv2.polylines(img, [pts_arr], isClosed=False, color=(0, 255, 255), thickness=2)
 
-        # 2) DESSINER LES POINTS COURANTS
+        # 3) DESSINER LES POINTS COURANTS
         df_t = self.df[self.df["t"] == self.t]
         for _, row in df_t.iterrows():
             x, y = int(row["x"]), int(row["y"])
             tid = int(row["track_id"])
             
             # cercle sur la cellule (Rose/Magenta style TrackMate : BGR -> 255, 0, 255)
-            cv2.circle(img, (x, y), 6, (255, 0, 255), 2)
+            cv2.circle(img, (x, y), 4, (255, 0, 255), 2)
             
             # ID
             cv2.putText(
@@ -209,7 +231,7 @@ class TrackViewer(ft.Container):
                 str(tid),
                 (x+8, y-8),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
+                0.4,
                 (255, 0, 255),
                 1,
                 cv2.LINE_AA
@@ -232,7 +254,7 @@ class TrackViewer(ft.Container):
         self.play_btn.text = "⏸" if self.playing else "▶"
         self.update()
         if self.playing:
-            self.autoplay()
+            asyncio.create_task(self.autoplay())
 
     async def autoplay(self):
         while self.playing:
@@ -295,7 +317,7 @@ def main(page: ft.Page):
 
     # --- GLOBAL DATA STORES ---
     # Stores for multiple files:
-    # {filename: {"tracks": df, "stack": np_array}}
+    # {filename: {"tracks": df, "stack": np_array, "masks": list_of_masks}}
     GLOBAL_RESULTS = {}
     # Full dataframe of all results (for global plots)
     GLOBAL_FULL_DF = None
@@ -767,7 +789,7 @@ def main(page: ft.Page):
 
                 try:
                     fname = os.path.basename(pth)
-                    metrics, tracks, current_stack = process_file(
+                    metrics, tracks, current_stack, current_masks = process_file(
                         pth, seg_method=method, logger=log, debug=True, fast_mode=use_fast
                     )
 
@@ -775,6 +797,7 @@ def main(page: ft.Page):
                     GLOBAL_RESULTS[fname] = {
                         "tracks": tracks,
                         "stack": current_stack,
+                        "masks": current_masks,
                         "condition": cond
                     }
 
@@ -838,6 +861,7 @@ def main(page: ft.Page):
             data = GLOBAL_RESULTS[file_key]
             df = data["tracks"]
             stack = data["stack"]
+            masks = data.get("masks", None)
 
             if df is None or df.empty:
                 table_container.controls.append(ft.Text("Pas de tracking pour ce fichier.", color="red300"))
@@ -911,7 +935,7 @@ def main(page: ft.Page):
             # --- ACTIONS ---
             def open_viewer_click(e):
                 if stack is None: return
-                viewer = TrackViewer(stack, df)
+                viewer = TrackViewer(stack, df, masks=masks)
                 page.overlay.append(viewer)
                 page.update()
 
