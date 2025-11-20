@@ -235,12 +235,10 @@ def main(page: ft.Page):
     folder_picker = ft.FilePicker()
     page.overlay.append(folder_picker)
     status = ft.Text("", selectable=True)
-    def on_folder_picked(e: ft.FilePickerResultEvent):
-        pass
     pick_folder_btn = ft.ElevatedButton(
         "Choisir un dossier",
-        icon=ft.Icon(name="folder_open"),
-        on_click=on_folder_picked
+        icon="folder_open",
+        on_click=lambda _: folder_picker.get_directory_path()
     )
 
     detect_btn = ft.ElevatedButton("Détecter les conditions", icon="search")
@@ -691,9 +689,8 @@ def main(page: ft.Page):
 
         toggle_ui(False)
         progress = ft.ProgressBar(width=520)
-        tabs.tabs[0].content.controls[:] = [ft.Text("Analyse en cours..."), progress]
-        log_view.controls.clear()
-
+        tabs.tabs[0].content.controls[:] = [ft.Text("Analyse en cours..."), progress, log_view]
+        
         method = seg_method.value
         if deep_check.value and method not in ("cellpose",):
             method = "gam_gpu"
