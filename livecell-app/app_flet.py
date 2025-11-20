@@ -113,6 +113,88 @@ def check_and_register_on_start(username_hint=None, ui_notify=None):
     return False
 
 
+def draw_annotated_frame(img_orig, t, df, masks):
+    """
+    Dessine les contours, tracks et IDs sur une frame donnée (numpy array).
+    Retourne une image BGR prête pour OpenCV/VideoWriter/Display.
+    """
+    import cv2
+    import numpy as np
+
+    img = img_orig.copy()
+    # Convert normalized float [0,1] to uint8 [0,255]
+    if img.dtype != 'uint8':
+         img = (img * 255).astype('uint8')
+
+    # Ensure image is RGB (or at least 3 channels)
+    if len(img.shape) == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+    # 1) DESSINER LES MASQUES
+    if masks is not None and len(masks) > t:
+        mask = masks[t]
+        if mask is not None:
+            u_labels = np.unique(mask)
+            for lbl in u_labels:
+                if lbl == 0: continue
+                bmask = (mask == lbl).astype(np.uint8)
+                contours, _ = cv2.findContours(bmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                # Green contours
+                cv2.drawContours(img, contours, -1, (0, 255, 0), 1)
+
+    # 2) DESSINER LES QUEUES (TAILS)
+    # Filter history <= t
+    history_df = df[df["t"] <= t]
+    present_ids = df[df["t"] == t]["track_id"].unique()
+
+    for tid in present_ids:
+        track_path = history_df[history_df["track_id"] == tid].sort_values("t")
+        pts = []
+        for _, r in track_path.iterrows():
+            pts.append([int(r["x"]), int(r["y"])])
+
+        if len(pts) > 1:
+            pts_arr = np.array(pts, np.int32).reshape((-1, 1, 2))
+            # Yellow path
+            cv2.polylines(img, [pts_arr], isClosed=False, color=(0, 255, 255), thickness=2)
+
+    # 3) DESSINER LES POINTS COURANTS
+    track_starts = df.groupby("track_id")["t"].min()
+
+    df_t = df[df["t"] == t]
+    for _, row in df_t.iterrows():
+        x, y = int(row["x"]), int(row["y"])
+        tid = int(row["track_id"])
+
+        t_start = track_starts.get(tid, 0)
+        age = t - t_start
+        # Cyan if new (<2 frames), Magenta otherwise
+        color = (255, 255, 0) if age < 2 else (255, 0, 255)
+
+        cv2.circle(img, (x, y), 4, color, 2)
+        cv2.putText(img, str(tid), (x+8, y-8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+
+    return img
+
+def generate_video(stack, df, masks, out_path, fps=10, logger=None):
+    import cv2
+    if not stack.shape[0]: return
+
+    h, w = stack.shape[1], stack.shape[2]
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
+
+    for t in range(len(stack)):
+        frame = stack[t]
+        annotated = draw_annotated_frame(frame, t, df, masks)
+        out.write(annotated)
+        if logger and t % 10 == 0:
+             logger(f"Export vidéo: frame {t}/{len(stack)}")
+
+    out.release()
+    if logger: logger("Export vidéo terminé.")
+
+
 class TrackViewer(ft.Container):
     def __init__(self, stack, tracking_df, masks=None):
         super().__init__(
@@ -161,93 +243,11 @@ class TrackViewer(ft.Container):
 
     # ---------------- FRAME UPDATE ----------------
     def update_frame(self):
-        img = self.stack[self.t].copy()
-        # Convert normalized float [0,1] to uint8 [0,255] if necessary for OpenCV
-        if img.dtype != 'uint8':
-             img = (img * 255).astype('uint8')
-
-        # Ensure image is RGB (or at least 3 channels) for colored drawing
-        import cv2
-        import numpy as np
-        if len(img.shape) == 2:
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-
-        # 1) DESSINER LES MASQUES (CONTOURS CELLPOSE) SI DISPONIBLES
-        if self.masks is not None and len(self.masks) > self.t:
-            mask = self.masks[self.t]
-            if mask is not None:
-                # Convert mask to contours
-                # Mask is int32, labels 0..N
-                # We want contours for each label
-                u_labels = np.unique(mask)
-                for lbl in u_labels:
-                    if lbl == 0: continue
-
-                    # Create binary mask for this label
-                    # uint8 for findContours
-                    bmask = (mask == lbl).astype(np.uint8)
-
-                    # Find contours
-                    contours, _ = cv2.findContours(bmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-                    # Draw contours in Green (0, 255, 0)
-                    cv2.drawContours(img, contours, -1, (0, 255, 0), 1)
-
-        # 2) DESSINER LES QUEUES (TAILS) : historique des positions jusqu'à t
-        # On filtre tout ce qui est <= t
-        history_df = self.df[self.df["t"] <= self.t]
-
-        # Pour chaque track_id présent à l'instant t
-        present_ids = self.df[self.df["t"] == self.t]["track_id"].unique()
-
-        for tid in present_ids:
-            # Récupérer le chemin complet de ce track jusqu'à t
-            track_path = history_df[history_df["track_id"] == tid].sort_values("t")
-
-            pts = []
-            for _, r in track_path.iterrows():
-                pts.append([int(r["x"]), int(r["y"])])
-
-            if len(pts) > 1:
-                # Dessiner la polyligne
-                pts_arr = np.array(pts, np.int32)
-                pts_arr = pts_arr.reshape((-1, 1, 2))
-                # Couleur aléatoire stable par ID ou fixe (ici jaune/orange style TrackMate)
-                # OpenCV utilise BGR -> (0, 255, 255) = Jaune
-                cv2.polylines(img, [pts_arr], isClosed=False, color=(0, 255, 255), thickness=2)
-
-        # 3) DESSINER LES POINTS COURANTS
-        # Highlight "New" cells (born this frame) in CYAN to help see mitosis/birth
-        track_starts = self.df.groupby("track_id")["t"].min()
-
-        df_t = self.df[self.df["t"] == self.t]
-        for _, row in df_t.iterrows():
-            x, y = int(row["x"]), int(row["y"])
-            tid = int(row["track_id"])
-            
-            # Check age
-            t_start = track_starts.get(tid, 0)
-            age = self.t - t_start
-
-            # Color: Cyan (255, 255, 0) if new (age < 2), else Magenta (255, 0, 255)
-            color = (255, 255, 0) if age < 2 else (255, 0, 255)
-
-            # cercle sur la cellule
-            cv2.circle(img, (x, y), 4, color, 2)
-            
-            # ID
-            cv2.putText(
-                img,
-                str(tid),
-                (x+8, y-8),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
-                color,
-                1,
-                cv2.LINE_AA
-            )
+        # Use shared function for rendering
+        img_annotated = draw_annotated_frame(self.stack[self.t], self.t, self.df, self.masks)
         
-        _, buf = cv2.imencode(".png", img)
+        import cv2
+        _, buf = cv2.imencode(".png", img_annotated)
         img_base64 = base64.b64encode(buf).decode()
 
         self.img_display.src_base64 = img_base64
@@ -416,8 +416,10 @@ def main(page: ft.Page):
 
     fp = ft.FilePicker()
     save_file_picker = ft.FilePicker()
+    video_save_picker = ft.FilePicker()
     page.overlay.append(fp)
     page.overlay.append(save_file_picker)
+    page.overlay.append(video_save_picker)
     picked_path_text = ft.Text("Aucun fichier chargé.")
     preview_file_path: str | None = None
 
@@ -752,6 +754,31 @@ def main(page: ft.Page):
              except Exception as ex:
                 log(f"[ERREUR] Export CSV : {ex}")
 
+    def video_save_callback(e: ft.FilePickerResultEvent):
+        if e.path and e.control.data:
+            out_path = e.path
+            data = e.control.data
+            stack = data["stack"]
+            df = data["df"]
+            masks = data["masks"]
+
+            log(f"Génération vidéo vers : {out_path} ...")
+            page.snack_bar = ft.SnackBar(ft.Text(f"Génération vidéo en cours..."))
+            page.snack_bar.open = True
+            page.update()
+
+            # Run in thread to avoid freezing UI
+            def _thread_target():
+                try:
+                    generate_video(stack, df, masks, out_path, fps=10, logger=print)
+                    log(f"[EXPORT] Vidéo terminée : {out_path}")
+                except Exception as ex:
+                    log(f"[ERREUR] Vidéo : {ex}")
+
+            threading.Thread(target=_thread_target, daemon=True).start()
+
+    video_save_picker.on_result = video_save_callback
+
     # ----------------------------------------------------------------------
     # LANCEMENT DE L'ANALYSE
     # ----------------------------------------------------------------------
@@ -962,9 +989,23 @@ def main(page: ft.Page):
             # Better: define specific handler
             save_file_picker.on_result = lambda e: save_csv_callback(e, df)
 
+            # --- VIDEO EXPORT ---
+            def export_video_click(e):
+                video_save_picker.data = {
+                    "stack": stack,
+                    "df": df,
+                    "masks": masks
+                }
+                video_save_picker.save_file(
+                    dialog_title=f"Exporter Vidéo {file_key}.mp4",
+                    file_name=f"{file_key}_tracking.mp4",
+                    allowed_extensions=["mp4"]
+                )
+
             actions_container.controls.extend([
                 ft.ElevatedButton("👁 Visualiser Track (TrackMate)", on_click=open_viewer_click, icon="remove_red_eye"),
-                ft.ElevatedButton("Export CSV (Fichier)", icon="download", on_click=export_current_csv, bgcolor="blue700", color="white")
+                ft.ElevatedButton("Export CSV", icon="download", on_click=export_current_csv, bgcolor="blue700", color="white"),
+                ft.ElevatedButton("Export Vidéo (.mp4)", icon="videocam", on_click=export_video_click, bgcolor="green700", color="white"),
             ])
             actions_container.update()
 
