@@ -66,8 +66,6 @@ def _read_metadata(path, logger=None):
                 if logger:
                     logger("Aucune ImageDescription trouvée.")
 
-            if logger:
-                logger("----------------------------")
 
             # Si vide → impossible de parser
             if not desc_value:
@@ -180,14 +178,35 @@ def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=Fa
                 logger("[WARN] Tracking vide.")
             
             metrics = pd.DataFrame({"file": [os.path.basename(path)]})
-            # --- CORRECTION 1 : On retourne 4 valeurs pour ne pas casser app_flet.py ---
-            return metrics, pd.DataFrame(), stack, labels_list
+            # --- CORRECTION : On retourne 5 valeurs (metrics, tracks, stack, masks, mitoses) ---
+            # Le dernier pd.DataFrame() vide correspond aux mitoses
+            return metrics, pd.DataFrame(), stack, labels_list, pd.DataFrame()
+
+        def filter_short_tracks(tracks, min_frames=5, logger=None):
+            """
+            Supprime les trajectoires trop courtes (souvent du bruit ou des débris).
+            """
+            if tracks is None or tracks.empty:
+                return tracks
+
+            # Compter le nombre de points pour chaque track_id
+            counts = tracks["track_id"].value_counts()
+            
+            # Garder uniquement les IDs qui ont assez de points
+            valid_ids = counts[counts >= min_frames].index
+            
+            n_removed = len(counts) - len(valid_ids)
+            
+            if n_removed > 0 and logger:
+                logger(f"    🧹 Nettoyage : {n_removed} pistes courtes supprimées (< {min_frames} frames)")
+                
+            # Filtrer le DataFrame
+            return tracks[tracks["track_id"].isin(valid_ids)].copy()
+
 
         # --- Motion features ---
         tracks = compute_motion_features(tracks, pixel_size, dt)
 
-        # --- Motion features ---
-        tracks = compute_motion_features(tracks, pixel_size, dt)
 
         # --- AJOUT : Détection Mitoses ---
         mitoses = detect_mitosis_events(tracks, max_dist=30.0)
@@ -857,54 +876,64 @@ def compute_group_stats(results):
 
 def plot_curves(results, out_dir="outputs"):
     from matplotlib.figure import Figure
+    import os
     
-    # On garde Agg pour éviter les conflits de thread, 
-    # mais on va retourner les objets Figure pour Flet.
-    
+    # On s'assure que le dossier de sauvegarde existe
     os.makedirs(out_dir, exist_ok=True)
-    figures = [] # Liste pour stocker (Titre, Figure)
+    
+    figures = [] # Cette liste doit contenir des tuples (Titre, ObjetFigure)
     
     if results is None or results.empty:
         return figures
 
+    # Calcul des moyennes
     mean_prolif = results.groupby(["condition","t"])["n_cells"].mean().reset_index()
     mean_surv = results.groupby(["condition","t"])["survival_frac"].mean().reset_index()
 
-    for cond in results["condition"].unique():
-        # --- Proliferation ---
+    unique_conds = results["condition"].unique()
+
+    for cond in unique_conds:
+        # --- Graphique 1 : Prolifération ---
         sub_p = mean_prolif[mean_prolif["condition"]==cond]
+        
+        # Création de la Figure Matplotlib
         fig1 = Figure(figsize=(6, 4), dpi=100)
         ax1 = fig1.add_subplot(111)
-        ax1.plot(sub_p["t"], sub_p["n_cells"], marker="o", color="tab:blue")
+        ax1.plot(sub_p["t"], sub_p["n_cells"], marker="o", color="tab:blue", label="N cellules")
         ax1.set_xlabel("Frame")
-        ax1.set_ylabel("Nombre de cellules")
+        ax1.set_ylabel("Nombre moyen")
         ax1.set_title(f"Prolifération — {cond}")
         ax1.grid(True, linestyle='--', alpha=0.6)
+        ax1.legend()
         
-        # Sauvegarde disque (optionnel, pour garder une trace)
+        # IMPORTANT : On ajoute l'objet Figure à la liste
+        figures.append((f"Prolifération ({cond})", fig1))
+
+        # On sauvegarde aussi sur le disque (optionnel mais utile)
         try:
             fig1.savefig(os.path.join(out_dir, f"proliferation_{cond}.png"))
         except: pass
-        
-        figures.append((f"Prolifération ({cond})", fig1))
 
-        # --- Survival ---
+        # --- Graphique 2 : Survie ---
         sub_s = mean_surv[mean_surv["condition"]==cond]
+        
         fig2 = Figure(figsize=(6, 4), dpi=100)
         ax2 = fig2.add_subplot(111)
-        ax2.plot(sub_s["t"], sub_s["survival_frac"], marker="o", color="tab:green")
+        ax2.plot(sub_s["t"], sub_s["survival_frac"], marker="o", color="tab:green", label="Survie")
         ax2.set_xlabel("Frame")
-        ax2.set_ylabel("Survie (Fraction)")
+        ax2.set_ylabel("Fraction (0-1)")
         ax2.set_title(f"Survie — {cond}")
         ax2.set_ylim(0, 1.05)
         ax2.grid(True, linestyle='--', alpha=0.6)
+        ax2.legend()
+
+        # IMPORTANT : On ajoute l'objet Figure à la liste
+        figures.append((f"Survie ({cond})", fig2))
 
         try:
             fig2.savefig(os.path.join(out_dir, f"survival_{cond}.png"))
         except: pass
         
-        figures.append((f"Survie ({cond})", fig2))
-
     return figures
 
 def get_interactive_charts(results):
@@ -914,31 +943,38 @@ def get_interactive_charts(results):
     - Erreur Standard SEM (Ombrage)
     - Normalisation (Fold Change)
     """
+    import plotly.graph_objects as go
     figures = []
+    
     if results is None or results.empty:
         return figures
 
-    import plotly.graph_objects as go
-
     # --- 1. PRÉPARATION DES DONNÉES ---
-    # On normalise la prolifération par fichier AVANT de moyenner
-    # Pour chaque fichier, on divise n_cells(t) par n_cells(0)
-    results = results.copy()
-    # On trouve le n_cells au temps min pour chaque fichier
+    # On copie pour ne pas modifier l'original
+    df = results.copy()
+    
+    # On normalise la prolifération par fichier (Fold Change vs t0)
     def normalize_group(g):
-        n0 = g.loc[g["t"] == g["t"].min(), "n_cells"].iloc[0]
+        # On prend la valeur moyenne à t=min pour ce fichier
+        t_min = g["t"].min()
+        n0 = g.loc[g["t"] == t_min, "n_cells"].mean()
         g["n_cells_norm"] = g["n_cells"] / max(1, n0) # Fold Change
         return g
 
-    results = results.groupby(["condition", "file"]).apply(normalize_group).reset_index(drop=True)
+    # Appliquer la normalisation par fichier
+    try:
+        df = df.groupby(["condition", "file"]).apply(normalize_group).reset_index(drop=True)
+    except Exception:
+        # Fallback si le groupby échoue
+        df["n_cells_norm"] = df["n_cells"]
 
     # --- 2. CALCUL DES STATS (Moyenne et SEM) ---
     # On groupe par Condition et Temps
-    stats = results.groupby(["condition", "t"]).agg(
+    stats = df.groupby(["condition", "t"]).agg(
         n_mean=("n_cells", "mean"),
-        n_sem=("n_cells", "sem"),       # Erreur standard (nombre brut)
+        n_sem=("n_cells", "sem"),       
         norm_mean=("n_cells_norm", "mean"),
-        norm_sem=("n_cells_norm", "sem"), # Erreur standard (normalisée)
+        norm_sem=("n_cells_norm", "sem"),
         surv_mean=("survival_frac", "mean"),
         surv_sem=("survival_frac", "sem")
     ).reset_index()
@@ -947,8 +983,10 @@ def get_interactive_charts(results):
     def add_trace_with_error(fig, df_cond, x_col, y_mean_col, y_sem_col, label, color):
         x = df_cond[x_col]
         y = df_cond[y_mean_col]
-        y_upper = y + df_cond[y_sem_col].fillna(0)
-        y_lower = y - df_cond[y_sem_col].fillna(0)
+        # Gestion des NaN pour l'erreur
+        y_err = df_cond[y_sem_col].fillna(0)
+        y_upper = y + y_err
+        y_lower = y - y_err
 
         # 1. Zone d'ombrage (Error Band)
         fig.add_trace(go.Scatter(
@@ -970,23 +1008,23 @@ def get_interactive_charts(results):
             name=label
         ))
 
-    # Couleurs pour les conditions (Rouge, Bleu, Vert, Orange...)
+    # Couleurs (Rouge, Bleu, Vert, Orange, Violet)
     colors = ["255,0,0", "0,128,255", "0,128,0", "255,128,0", "128,0,128"]
     unique_conds = stats["condition"].unique()
 
-    # --- GRAPH 1 : PROLIFÉRATION NORMALISÉE (Fold Change) ---
+    # --- GRAPH 1 : PROLIFÉRATION NORMALISÉE ---
     fig_p = go.Figure()
     for i, cond in enumerate(unique_conds):
         sub = stats[stats["condition"] == cond]
-        color = colors[i % len(colors)]
-        add_trace_with_error(fig_p, sub, "t", "norm_mean", "norm_sem", cond, color)
+        c_code = colors[i % len(colors)]
+        add_trace_with_error(fig_p, sub, "t", "norm_mean", "norm_sem", cond, c_code)
 
     fig_p.update_layout(
-        title="Prolifération (Normalisée t0 = 1.0)",
+        title="Prolifération (Normalisée)",
         xaxis_title="Frame (t)",
         yaxis_title="Fold Change (N_t / N_0)",
-        hovermode="x unified",
-        template="plotly_white"
+        template="plotly_white",
+        hovermode="x unified"
     )
     figures.append(fig_p)
 
@@ -994,34 +1032,18 @@ def get_interactive_charts(results):
     fig_s = go.Figure()
     for i, cond in enumerate(unique_conds):
         sub = stats[stats["condition"] == cond]
-        color = colors[i % len(colors)]
-        add_trace_with_error(fig_s, sub, "t", "surv_mean", "surv_sem", cond, color)
+        c_code = colors[i % len(colors)]
+        add_trace_with_error(fig_s, sub, "t", "surv_mean", "surv_sem", cond, c_code)
 
     fig_s.update_layout(
         title="Taux de Survie",
         xaxis_title="Frame (t)",
         yaxis_title="Fraction de survie",
         yaxis=dict(range=[0, 1.05]),
-        hovermode="x unified",
-        template="plotly_white"
+        template="plotly_white",
+        hovermode="x unified"
     )
     figures.append(fig_s)
-
-    # --- GRAPH 3 : NOMBRE BRUT (Pour info) ---
-    fig_raw = go.Figure()
-    for i, cond in enumerate(unique_conds):
-        sub = stats[stats["condition"] == cond]
-        color = colors[i % len(colors)]
-        add_trace_with_error(fig_raw, sub, "t", "n_mean", "n_sem", cond, color)
-    
-    fig_raw.update_layout(
-        title="Nombre de cellules (Brut)",
-        xaxis_title="Frame (t)",
-        yaxis_title="Nombre Absolu",
-        hovermode="x unified",
-        template="plotly_white"
-    )
-    figures.append(fig_raw)
 
     return figures
 
@@ -1081,7 +1103,7 @@ def generate_overlay_preview(path, sigma, min_size, clahe_clip, deep_enhance, lo
     # --- Cellpose ---
     mask = None
     if CELLPOSE_OK:
-        if logger: logger("Tentative de segmentation via Cellpose (cyto3)…")
+        if logger: logger("Tentative de segmentation via Cellpose…")
         try:
             mask = _segment_frame_cellpose(img, logger=logger)
         except Exception as e:

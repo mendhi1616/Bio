@@ -340,11 +340,10 @@ def main(page: ft.Page):
     condition_checkboxes: Dict[str, List[ft.Checkbox]] = {}
 
     # --- GLOBAL DATA STORES ---
-    # Stores for multiple files:
-    # {filename: {"tracks": df, "stack": np_array, "masks": list_of_masks}}
     GLOBAL_RESULTS = {}
-    # Full dataframe of all results (for global plots)
     GLOBAL_FULL_DF = None
+    # Par défaut dans outputs, mais changera à chaque analyse
+    CURRENT_OUTPUT_DIR = os.path.join(data_root.value, "outputs")
 
     global tracking_tab
     tracking_tab = None
@@ -369,7 +368,7 @@ def main(page: ft.Page):
 
         found = []
         for name in sorted(os.listdir(root)):
-            if name.lower() in ("outputs", "__pycache__", "models", ".venv"):
+            if name.lower() in ("outputs", "__pycache__", "models", ".venv", "temp_napari", "results_auto"):
                 continue
 
             p = os.path.join(root, name)
@@ -796,8 +795,9 @@ def main(page: ft.Page):
     # LANCEMENT DE L'ANALYSE
     # ----------------------------------------------------------------------
     def run_analysis(e=None):
-        nonlocal GLOBAL_RESULTS, GLOBAL_FULL_DF
+        nonlocal GLOBAL_RESULTS, GLOBAL_FULL_DF, CURRENT_OUTPUT_DIR
         root = data_root.value.strip()
+        import time
 
         GLOBAL_RESULTS = {}
         all_results_meta = []
@@ -817,6 +817,24 @@ def main(page: ft.Page):
             status.value = "Sélectionnez au moins une image."
             page.update()
             return
+        
+        timestamp = time.strftime("%Y-%m-%d_%Hh%M")
+        total_files = sum(len(v) for v in selection.values())
+        
+        if total_files == 1:
+            # Si un seul fichier : Nom_du_fichier_Date
+            first_file = list(selection.values())[0][0]
+            base_name = os.path.splitext(os.path.basename(first_file))[0]
+            run_folder_name = f"{timestamp}_{base_name}"
+        else:
+            # Si plusieurs : Date_Batch
+            run_folder_name = f"{timestamp}_Batch_{total_files}files"
+
+        # On met à jour le dossier de sortie pour cette session
+        CURRENT_OUTPUT_DIR = os.path.join(root, "outputs", run_folder_name)
+        os.makedirs(CURRENT_OUTPUT_DIR, exist_ok=True)
+        
+        log(f"📂 Résultats sauvegardés dans : outputs/{run_folder_name}")
 
         toggle_ui(False)
         progress = ft.ProgressBar(width=520)
@@ -1018,7 +1036,7 @@ def main(page: ft.Page):
                 )
 
             actions_container.controls.extend([
-                ft.ElevatedButton("👁 Visualiser Track (TrackMate)", on_click=open_viewer_click, icon="remove_red_eye"),
+                ft.ElevatedButton("👁 Visualiser Track", on_click=open_viewer_click, icon="remove_red_eye"),
                 ft.ElevatedButton("Export CSV", icon="download", on_click=export_current_csv, bgcolor="blue700", color="white"),
                 ft.ElevatedButton("Export Vidéo (.mp4)", icon="videocam", on_click=export_video_click, bgcolor="green700", color="white"),
             ])
@@ -1032,39 +1050,56 @@ def main(page: ft.Page):
         # --- GLOBAL ACTIONS DEFINITION (moved before render) ---
         out_dir = os.path.join(root, "outputs")
 
+
+# --- GESTION DES GRAPHIQUES (Version Matplotlib Corrigée) ---
         def show_graphs(e):
+            import importlib
+            import pipeline
+            
             try:
                 page.snack_bar = ft.SnackBar(ft.Text("Génération des graphiques..."))
                 page.snack_bar.open = True
                 page.update()
 
-                # On utilise plot_curves qui retourne maintenant des figures Matplotlib
+                # 1. Vérifier qu'il y a des données
+                if GLOBAL_FULL_DF is None or GLOBAL_FULL_DF.empty:
+                    page.snack_bar = ft.SnackBar(ft.Text("Aucune donnée à afficher. Lancez une analyse d'abord !", color="red"))
+                    page.snack_bar.open = True
+                    page.update()
+                    return
+
+                # 2. Forcer le rechargement de pipeline pour être sûr d'avoir la bonne fonction
+                # (Ceci corrige le bug où l'app utilise une vieille version en mémoire)
+                importlib.reload(pipeline)
                 from pipeline import plot_curves
 
-                # Récupère les figures [(Titre, Fig), ...]
-                figs_data = plot_curves(GLOBAL_FULL_DF, out_dir=out_dir)
+                # 3. Récupérer les figures
+                # Note : on utilise CURRENT_OUTPUT_DIR défini dans run_analysis
+                figs_data = plot_curves(GLOBAL_FULL_DF, out_dir=CURRENT_OUTPUT_DIR)
 
                 dlg_content = ft.Column(scroll=ft.ScrollMode.AUTO, height=600, width=900)
 
                 if not figs_data:
                     dlg_content.controls.append(
-                        ft.Text("Aucune donnée à afficher. Lancez une analyse d'abord.", color="red")
+                        ft.Text("Erreur : La fonction plot_curves n'a rien renvoyé (liste vide).", color="red")
                     )
                 else:
-                    # On affiche chaque figure dans une carte
                     for title, fig in figs_data:
+                        # IMPORTANT : On force la taille ici pour que Flet l'affiche
+                        chart_container = ft.Container(
+                            content=ft.MatplotlibChart(fig, expand=True, transparent=False),
+                            height=450,  # Hauteur fixe OBLIGATOIRE pour voir le graph
+                            padding=10,
+                            border=ft.border.all(1, "grey"),
+                            border_radius=5,
+                            margin=5
+                        )
+                        
                         dlg_content.controls.append(
-                            ft.Container(
-                                content=ft.Column([
-                                    ft.Text(title, size=16, weight=ft.FontWeight.BOLD),
-                                    # Composant Flet pour afficher Matplotlib
-                                    ft.MatplotlibChart(fig, expand=False, original_size=True)
-                                ]),
-                                padding=10,
-                                border=ft.border.all(1, "grey"),
-                                border_radius=5,
-                                margin=5
-                            )
+                            ft.Column([
+                                ft.Text(title, size=16, weight=ft.FontWeight.BOLD),
+                                chart_container
+                            ])
                         )
 
                 dlg = ft.AlertDialog(
@@ -1072,84 +1107,96 @@ def main(page: ft.Page):
                     content=dlg_content,
                     actions=[ft.TextButton("Fermer", on_click=lambda _: page.close_dialog())],
                 )
-                e.page.dialog = dlg
+                page.dialog = dlg
                 dlg.open = True
-                e.page.update()
+                page.update()
 
             except Exception as ex:
-                log(f"[ERREUR] Affichage courbes : {ex}")
+                log(f"[CRASH] Affichage courbes : {ex}")
                 import traceback
+                # Affiche l'erreur complète dans la petite fenêtre de logs de l'app
                 log(traceback.format_exc())
-                
-        # Comparison Dialog
+
+
+        # --- COMPARAISON DES RÉSULTATS (Version Corrigée) ---
         def show_comparison(e):
-            files = list(GLOBAL_RESULTS.keys())
-            if len(files) < 2:
-                page.snack_bar = ft.SnackBar(ft.Text("Il faut au moins 2 fichiers pour comparer."))
-                page.snack_bar.open = True
-                page.update()
-                return
-
-            dd1 = ft.Dropdown(options=[ft.dropdown.Option(f) for f in files], value=files[0], label="Fichier A", expand=True)
-            dd2 = ft.Dropdown(options=[ft.dropdown.Option(f) for f in files], value=files[1] if len(files)>1 else files[0], label="Fichier B", expand=True)
-            result_area = ft.Column()
-
-            def compute_comp(e):
-                f1, f2 = dd1.value, dd2.value
-                if not f1 or not f2: return
-
-                df1 = GLOBAL_RESULTS[f1]["tracks"]
-                df2 = GLOBAL_RESULTS[f2]["tracks"]
-
-                # Simple Stats
-                # Avoid crash if empty
-                if df1.empty or df2.empty:
-                    result_area.controls = [ft.Text("Données vides pour l'un des fichiers.")]
-                    result_area.update()
+            try:
+                files = list(GLOBAL_RESULTS.keys())
+                
+                if len(files) < 2:
+                    page.snack_bar = ft.SnackBar(ft.Text("Il faut analyser au moins 2 fichiers pour comparer."))
+                    page.snack_bar.open = True
+                    page.update()
                     return
 
-                s1_speed = df1["speed_um_s"].mean()
-                s2_speed = df2["speed_um_s"].mean()
-                count1 = df1["track_id"].nunique()
-                count2 = df2["track_id"].nunique()
+                dd1 = ft.Dropdown(options=[ft.dropdown.Option(f) for f in files], value=files[0], label="Fichier A", expand=True)
+                dd2 = ft.Dropdown(options=[ft.dropdown.Option(f) for f in files], value=files[1] if len(files)>1 else files[0], label="Fichier B", expand=True)
+                result_area = ft.Column()
 
-                # Last time point survival (approx)
-                t_max1 = df1["t"].max()
-                t_max2 = df2["t"].max()
+                def compute_comp(e):
+                    try:
+                        f1, f2 = dd1.value, dd2.value
+                        if not f1 or not f2: return
 
-                txt = (
-                    f"**Comparaison**\n\n"
-                    f"**{f1}**:\n"
-                    f" - Cellules (total tracks): {count1}\n"
-                    f" - Vitesse moy: {s1_speed:.4f} µm/s\n"
-                    f" - Durée (frames): {t_max1}\n\n"
-                    f"**{f2}**:\n"
-                    f" - Cellules (total tracks): {count2}\n"
-                    f" - Vitesse moy: {s2_speed:.4f} µm/s\n"
-                    f" - Durée (frames): {t_max2}\n\n"
-                    f"**Delta** (A - B):\n"
-                    f" - Speed: {s1_speed - s2_speed:.4f}\n"
-                    f" - Cells: {count1 - count2}"
+                        res1 = GLOBAL_RESULTS.get(f1)
+                        res2 = GLOBAL_RESULTS.get(f2)
+                        
+                        if not res1 or not res2: return
+
+                        df1 = res1.get("tracks")
+                        df2 = res2.get("tracks")
+
+                        if df1 is None or df1.empty:
+                            result_area.controls = [ft.Text(f"Pas de tracking pour {f1}", color="red")]
+                            result_area.update()
+                            return
+                        
+                        if df2 is None or df2.empty:
+                            result_area.controls = [ft.Text(f"Pas de tracking pour {f2}", color="red")]
+                            result_area.update()
+                            return
+
+                        # Stats
+                        col_s = "speed_um_s" if "speed_um_s" in df1.columns else "speed"
+                        s1 = df1[col_s].mean() if col_s in df1.columns else 0
+                        s2 = df2[col_s].mean() if col_s in df2.columns else 0
+                        
+                        c1 = df1["track_id"].nunique()
+                        c2 = df2["track_id"].nunique()
+
+                        txt = (
+                            f"### Comparaison\n\n"
+                            f"**{f1}** : {c1} cellules, Vitesse {s1:.3f} µm/s\n"
+                            f"**{f2}** : {c2} cellules, Vitesse {s2:.3f} µm/s\n\n"
+                            f"**Delta (A-B)** : Vitesse {s1-s2:.3f}, Cellules {c1-c2}"
+                        )
+                        result_area.controls = [ft.Markdown(txt)]
+                        result_area.update()
+                    except Exception as ex_comp:
+                         result_area.controls = [ft.Text(f"Erreur calcul : {ex_comp}", color="red")]
+                         result_area.update()
+
+                dlg = ft.AlertDialog(
+                    title=ft.Text("⚖️ Comparer deux résultats"),
+                    content=ft.Container(
+                        content=ft.Column([
+                            ft.Row([dd1, dd2]),
+                            ft.ElevatedButton("Lancer la comparaison", on_click=compute_comp),
+                            ft.Divider(),
+                            result_area
+                        ], height=400, width=600),
+                        padding=10
+                    ),
+                    actions=[ft.TextButton("Fermer", on_click=lambda _: page.close_dialog())]
                 )
-                result_area.controls = [ft.Markdown(txt)]
-                result_area.update()
-
-            dlg = ft.AlertDialog(
-                title=ft.Text("Comparer deux résultats"),
-                content=ft.Container(
-                    content=ft.Column([
-                        ft.Row([dd1, dd2]),
-                        ft.ElevatedButton("Comparer", on_click=compute_comp),
-                        ft.Divider(),
-                        result_area
-                    ], height=400, width=500),
-                    padding=10
-                ),
-                actions=[ft.TextButton("Fermer", on_click=lambda _: page.close_dialog())]
-            )
-            page.dialog = dlg
-            dlg.open = True
-            page.update()
+                page.dialog = dlg
+                dlg.open = True
+                page.update()
+                
+            except Exception as ex:
+                log(f"[CRASH] Comparaison : {ex}")
+                import traceback
+                log(traceback.format_exc())
 
 
 # Napari Bridge Function
