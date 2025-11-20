@@ -938,10 +938,7 @@ def main(page: ft.Page):
 
         file_dropdown.on_change = on_file_change
 
-        # Initial render
-        refresh_view(current_file_key)
-
-        # --- GLOBAL ACTIONS ---
+        # --- GLOBAL ACTIONS DEFINITION (moved before render) ---
         out_dir = os.path.join(root, "outputs")
         # Plot curves using GLOBAL_FULL_DF (all files metrics)
         saved_plots = plot_curves(GLOBAL_FULL_DF, out_dir=out_dir)
@@ -1048,6 +1045,9 @@ def main(page: ft.Page):
         tracking_tab.controls.append(ft.Divider())
         tracking_tab.controls.append(table_container)
         tracking_tab.update()
+
+        # Initial render - Now safe because containers are on the page
+        refresh_view(current_file_key)
 
 
 
