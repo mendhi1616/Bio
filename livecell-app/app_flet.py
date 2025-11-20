@@ -976,28 +976,45 @@ def main(page: ft.Page):
         # --- GLOBAL ACTIONS DEFINITION (moved before render) ---
         out_dir = os.path.join(root, "outputs")
         # Plot curves using GLOBAL_FULL_DF (all files metrics)
+        # We initialize it here, but we should update it if it changes.
+        # Since this is inside run_analysis, GLOBAL_FULL_DF is fixed for this run.
         saved_plots = plot_curves(GLOBAL_FULL_DF, out_dir=out_dir)
 
         def show_graphs(e):
-            dlg_content = ft.Column(scroll=ft.ScrollMode.AUTO, height=600)
-            if not saved_plots:
-                dlg_content.controls.append(ft.Text("Aucun graphique généré."))
-            else:
-                for p_path in saved_plots:
-                    if os.path.exists(p_path):
-                         with open(p_path, "rb") as f:
-                             b64 = base64.b64encode(f.read()).decode("utf-8")
-                         dlg_content.controls.append(
-                             ft.Image(src_base64=b64, width=600, fit=ft.ImageFit.CONTAIN)
-                         )
-            dlg = ft.AlertDialog(
-                title=ft.Text("Courbes Globales (Prolifération & Survie)"),
-                content=dlg_content,
-                actions=[ft.TextButton("Fermer", on_click=lambda _: page.close_dialog())],
-            )
-            page.dialog = dlg
-            dlg.open = True
-            page.update()
+            try:
+                log(f"Ouverture des courbes... ({len(saved_plots)} plots)")
+                dlg_content = ft.Column(scroll=ft.ScrollMode.AUTO, height=600)
+
+                if not saved_plots:
+                    dlg_content.controls.append(ft.Text("Aucun graphique généré. Vérifiez que l'analyse a produit des résultats.", color="red300"))
+                else:
+                    for p_path in saved_plots:
+                        if os.path.exists(p_path):
+                             # Read as binary and convert to base64
+                             with open(p_path, "rb") as f:
+                                 b64 = base64.b64encode(f.read()).decode("utf-8")
+                             dlg_content.controls.append(
+                                 ft.Container(
+                                     content=ft.Image(src_base64=b64, width=600, fit=ft.ImageFit.CONTAIN),
+                                     padding=10
+                                 )
+                             )
+                        else:
+                             dlg_content.controls.append(ft.Text(f"Fichier introuvable : {p_path}", color="red300"))
+
+                dlg = ft.AlertDialog(
+                    title=ft.Text("Courbes Globales (Prolifération & Survie)"),
+                    content=dlg_content,
+                    actions=[ft.TextButton("Fermer", on_click=lambda _: page.close_dialog())],
+                )
+                page.dialog = dlg
+                dlg.open = True
+                page.update()
+            except Exception as ex:
+                log(f"[ERREUR] Affichage courbes : {ex}")
+                page.snack_bar = ft.SnackBar(ft.Text(f"Erreur: {ex}"))
+                page.snack_bar.open = True
+                page.update()
 
         # Comparison Dialog
         def show_comparison(e):
