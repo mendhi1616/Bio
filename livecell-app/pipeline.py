@@ -408,25 +408,55 @@ def _segment_stack(stack, method="gam", logger=None, **kwargs):
     if method == "auto":
         method = "cellpose" if CELLPOSE_OK else "gam"
 
-    # ----- Mode Cellpose v4 -----
+    # ----- Mode Cellpose v4 (Batch Processing) -----
     if method == "cellpose" and CELLPOSE_OK:
-        for t, frame in enumerate(stack):
+        global GLOBAL_MODEL
+        use_gpu = torch.cuda.is_available() if TORCH_OK else False
 
-            # ✔️ Log du modèle ici (plus propre & sans paramètre inutile)
-            if logger and t == 0:
-                logger(f"[INFO] Segmentation Cellpose (modèle 'cyto2')")
+        if GLOBAL_MODEL is None:
+            if logger: logger("[INFO] Initialisation du modèle Cellpose…")
+            GLOBAL_MODEL = CellposeModel(gpu=use_gpu)
 
-            # ✔️ Correction : suppression du paramètre model_type
-            labels = _segment_frame_cellpose(
-                frame,
-                logger=logger
+        if logger:
+            logger(f"[INFO] Segmentation Cellpose (Batch) - GPU={use_gpu}")
+
+        # Prepare stack for batch processing
+        # Normalize if not already done (stack is usually float [0,1] from _load_stack)
+        # Cellpose expects list of arrays or single 3D array (frames, Y, X)
+        # We pass the stack directly.
+
+        try:
+            # Run evaluation in batch
+            # batch_size 8 is conservative to avoid OOM, can increase if needed
+            masks_3d = GLOBAL_MODEL.eval(
+                stack,
+                batch_size=8,
+                channels=[0, 0],
+                diameter=30.0, # Ensure default diameter or pass it
+                do_3D=False
             )
 
-            labels_list.append(labels)
+            # Handle return format (can vary by version)
+            if isinstance(masks_3d, tuple) or isinstance(masks_3d, list):
+                masks_3d = masks_3d[0] # masks is first element
 
-            # Log toutes les 10 frames et dernière
-            if logger and (t % 10 == 0 or t == len(stack) - 1):
-                logger(f"    • Frames Cellpose: {t+1}/{len(stack)}")
+            if isinstance(masks_3d, list):
+                 # Convert list of 2D arrays to 3D array or list of 2D
+                 labels_list = masks_3d
+            else:
+                 # Assuming numpy array (T, Y, X)
+                 labels_list = [masks_3d[i] for i in range(masks_3d.shape[0])]
+
+            if logger:
+                logger(f"    • Cellpose Batch terminé ({len(labels_list)} frames)")
+
+        except Exception as e:
+            if logger: logger(f"[ERREUR] Batch Cellpose échoué ({e}) — fallback frame-by-frame.")
+            # Fallback loop
+            for t, frame in enumerate(stack):
+                labels = _segment_frame_cellpose(frame, logger=logger)
+                labels_list.append(labels)
+                if logger and t % 10 == 0: logger(f"    • Frame {t} (fallback)")
 
         return labels_list
 
