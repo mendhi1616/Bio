@@ -1024,33 +1024,29 @@ def main(page: ft.Page):
                 page.snack_bar.open = True
                 page.update()
 
-                # Re-generate curves on demand to ensure data is fresh
-                log(f"Génération des courbes pour {len(GLOBAL_FULL_DF) if GLOBAL_FULL_DF is not None else 0} entrées...")
-                saved_plots = plot_curves(GLOBAL_FULL_DF, out_dir=out_dir)
+                # Generate INTERACTIVE charts via Plotly
+                # This returns a list of ft.PlotlyChart controls (or we can create them here)
+                # For now, let's assume get_interactive_charts returns a list of plotly.graph_objects.Figure
+                from pipeline import get_interactive_charts
 
-                dlg_content = ft.Column(scroll=ft.ScrollMode.AUTO, height=600)
+                figures = get_interactive_charts(GLOBAL_FULL_DF)
 
-                if not saved_plots:
+                dlg_content = ft.Column(scroll=ft.ScrollMode.AUTO, height=600, width=900)
+
+                if not figures:
                     dlg_content.controls.append(ft.Text("Aucun graphique généré. Vérifiez que l'analyse a produit des résultats.", color="red300"))
                 else:
-                    for p_path in saved_plots:
-                        # Ensure path is absolute to avoid confusion
-                        abs_path = os.path.abspath(p_path)
-                        if os.path.exists(abs_path):
-                             # Read as binary and convert to base64
-                             with open(abs_path, "rb") as f:
-                                 b64 = base64.b64encode(f.read()).decode("utf-8")
-                             dlg_content.controls.append(
-                                 ft.Container(
-                                     content=ft.Image(src_base64=b64, width=600, fit=ft.ImageFit.CONTAIN),
-                                     padding=10
-                                 )
-                             )
-                        else:
-                             dlg_content.controls.append(ft.Text(f"Fichier introuvable : {abs_path}", color="red300"))
+                    for fig in figures:
+                        dlg_content.controls.append(
+                            ft.Container(
+                                content=ft.PlotlyChart(fig, expand=False),
+                                height=400,
+                                padding=10
+                            )
+                        )
 
                 dlg = ft.AlertDialog(
-                    title=ft.Text("Courbes Globales (Prolifération & Survie)"),
+                    title=ft.Text("Courbes Globales Interactives"),
                     content=dlg_content,
                     actions=[ft.TextButton("Fermer", on_click=lambda _: page.close_dialog())],
                 )
@@ -1134,9 +1130,78 @@ def main(page: ft.Page):
             dlg.open = True
             page.update()
 
+        # Napari Bridge Function
+        def open_napari_viewer(e):
+            files = list(GLOBAL_RESULTS.keys())
+            if not files: return
+
+            # Use currently selected file if possible
+            key = file_dropdown.value if file_dropdown.value else files[0]
+            data = GLOBAL_RESULTS[key]
+            stack = data["stack"]
+            masks = data.get("masks", None)
+
+            page.snack_bar = ft.SnackBar(ft.Text(f"Ouverture de Napari pour {key}..."))
+            page.snack_bar.open = True
+            page.update()
+
+            # Run in separate process to avoid blocking Flet loop
+            import multiprocessing
+            # Need to define target function at module level to be picklable on Windows
+            # or use a helper script. For simplicity, we'll use a thread here but napari needs main thread usually.
+            # Actually, Napari + Flet in same process is risky.
+            # Best approach: save data to temp file and launch a subprocess script.
+
+            import tifffile
+            import subprocess
+            import sys
+
+            temp_dir = os.path.join(root, "temp_napari")
+            os.makedirs(temp_dir, exist_ok=True)
+
+            img_path = os.path.join(temp_dir, "img.tif")
+            lbl_path = os.path.join(temp_dir, "labels.tif")
+
+            tifffile.imwrite(img_path, stack)
+            if masks is not None:
+                # masks is list of 2D arrays, stack them
+                lbl_stack = np.array(masks, dtype=np.int32)
+                tifffile.imwrite(lbl_path, lbl_stack)
+            else:
+                if os.path.exists(lbl_path): os.remove(lbl_path)
+
+            # Launch script
+            script_code = f"""
+import napari
+import tifffile
+import os
+
+def view():
+    viewer = napari.Viewer()
+    if os.path.exists(r'{img_path}'):
+        img = tifffile.imread(r'{img_path}')
+        viewer.add_image(img, name='Image')
+
+    if os.path.exists(r'{lbl_path}'):
+        lbl = tifffile.imread(r'{lbl_path}')
+        viewer.add_labels(lbl, name='Masks')
+
+    napari.run()
+
+if __name__ == '__main__':
+    view()
+"""
+            script_path = os.path.join(temp_dir, "launch_napari.py")
+            with open(script_path, "w", encoding="utf-8") as f:
+                f.write(script_code)
+
+            subprocess.Popen([sys.executable, script_path])
+
+
         global_actions = ft.Row([
-             ft.ElevatedButton("📈 Visualiser les Courbes Globales", on_click=show_graphs, icon="show_chart"),
-             ft.ElevatedButton("⚖️ Comparer Résultats", on_click=show_comparison, icon="compare_arrows")
+             ft.ElevatedButton("📈 Courbes Interactives", on_click=show_graphs, icon="show_chart"),
+             ft.ElevatedButton("⚖️ Comparer Résultats", on_click=show_comparison, icon="compare_arrows"),
+             ft.ElevatedButton("🧊 Ouvrir Napari (3D)", on_click=open_napari_viewer, icon="layers", bgcolor="teal700", color="white")
         ])
 
         tracking_tab.controls.append(ft.Container(content=file_dropdown, padding=10))
