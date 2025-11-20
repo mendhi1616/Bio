@@ -116,7 +116,7 @@ def check_and_register_on_start(username_hint=None, ui_notify=None):
 class TrackViewer(ft.Container):
     def __init__(self, stack, tracking_df):
         super().__init__(
-            bgcolor=ft.colors.BLACK,
+            bgcolor="black",
             padding=10,
             expand=True
         )
@@ -139,13 +139,13 @@ class TrackViewer(ft.Container):
         self.play_btn = ft.TextButton(
             "▶",
             on_click=self.toggle_play,
-            style=ft.ButtonStyle(color=ft.colors.WHITE)
+            style=ft.ButtonStyle(color="white")
         )
 
         self.close_btn = ft.TextButton(
             "✖",
             on_click=self.close,
-            style=ft.ButtonStyle(color=ft.colors.RED_400)
+            style=ft.ButtonStyle(color="red400")
         )
 
         self.content = ft.Column(
@@ -380,6 +380,9 @@ def main(page: ft.Page):
     preview_file_path: str | None = None
 
     auto_preview_check = ft.Switch(label="Aperçu automatique (ON/OFF)", value=True)
+
+    # Option "Mode Rapide" pour l'analyse
+    fast_mode_check = ft.Switch(label="⚡ Mode Rapide (1 frame sur 2)", value=False)
 
     pick_btn = ft.ElevatedButton(
         "Charger une image (TIF / PNG / JPG)",
@@ -686,7 +689,7 @@ def main(page: ft.Page):
     def toggle_ui(enabled: bool):
         for ctrl in [
             run_btn, detect_btn, seg_method, data_root,
-            sigma_slider, min_size_slider, clahe_slider, deep_check
+            sigma_slider, min_size_slider, clahe_slider, deep_check, fast_mode_check
         ]:
             ctrl.disabled = not enabled
         page.update()
@@ -729,7 +732,8 @@ def main(page: ft.Page):
         if deep_check.value and method not in ("cellpose",):
             method = "gam_gpu"
 
-        log(f"Analyse — méthode: {method} — deep={deep_check.value}")
+        use_fast = bool(fast_mode_check.value)
+        log(f"Analyse — méthode: {method} — deep={deep_check.value} — fast={use_fast}")
 
         total = sum(len(v) for v in selection.values())
         done = 0
@@ -743,7 +747,7 @@ def main(page: ft.Page):
                 try:
                     # Now extracting stack as well
                     metrics, tracks, current_stack = process_file(
-                        pth, seg_method=method, logger=log, debug=True
+                        pth, seg_method=method, logger=log, debug=True, fast_mode=use_fast
                     )
 
                     last_stack = current_stack
@@ -780,7 +784,7 @@ def main(page: ft.Page):
         if not all_tracks or len(all_tracks) == 0:
             log("[WARN] Aucun tracking détecté.")
             tracking_tab.controls.append(
-                ft.Text("Aucune cellule suivie dans cette vidéo.", color=ft.colors.RED_300)
+                ft.Text("Aucune cellule suivie dans cette vidéo.", color="red300")
             )
             tracking_tab.update()
             return
@@ -790,7 +794,7 @@ def main(page: ft.Page):
         if tracking_df.shape[0] == 0:
             log("[WARN] Tracking vide.")
             tracking_tab.controls.append(
-                ft.Text("Aucune cellule suivie.", color=ft.colors.RED_300)
+                ft.Text("Aucune cellule suivie.", color="red300")
             )
             tracking_tab.update()
             return
@@ -940,8 +944,8 @@ def main(page: ft.Page):
             "Export CSV",
             icon=ft.Icon(name="download"),
             on_click=export_csv,
-            bgcolor=ft.colors.BLUE_700,
-            color=ft.colors.WHITE,
+            bgcolor="blue700",
+            color="white",
         )
 
 
@@ -980,6 +984,7 @@ def main(page: ft.Page):
     page.add(
         ft.Text("Test Version 2.0", weight=ft.FontWeight.BOLD, size=18),
         ft.Row([data_root, pick_folder_btn, detect_btn, seg_method]),
+        ft.Row([fast_mode_check]),
         ft.Divider(),
         ft.Text("Conditions expérimentales :"),
         conditions_panel,

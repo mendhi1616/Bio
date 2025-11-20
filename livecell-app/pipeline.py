@@ -119,11 +119,11 @@ def _read_metadata(path, logger=None):
 from cellpose.models import CellposeModel
 GLOBAL_MODEL = None
 
-def process_file(path, seg_method="auto", logger=None, debug=False):
+def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=False):
     t0 = time.time()
 
     if logger:
-        logger(f"➡️ Fichier: {os.path.basename(path)} — méthode={seg_method}")
+        logger(f"➡️ Fichier: {os.path.basename(path)} — méthode={seg_method} — fast={fast_mode}")
 
     # --- Charger stack ---
     stack = _load_stack(path, logger=logger)
@@ -134,6 +134,12 @@ def process_file(path, seg_method="auto", logger=None, debug=False):
         pixel_size = 0.1
     if dt is None:
         dt = 60.0
+
+    # --- FAST MODE : 1 frame sur 2 ---
+    if fast_mode:
+        if logger: logger("⚡ Mode Rapide activé : traitement de 1 frame sur 2.")
+        stack = stack[::2]
+        dt *= 2.0
 
     # --- Choix méthode ---
     if seg_method == "auto":
