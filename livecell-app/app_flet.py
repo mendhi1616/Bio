@@ -836,6 +836,7 @@ def main(page: ft.Page):
                         "tracks": tracks,
                         "stack": current_stack,
                         "masks": current_masks,
+                        "metrics": metrics,
                         "condition": cond
                     }
 
@@ -1200,10 +1201,91 @@ if __name__ == '__main__':
 
             subprocess.Popen([sys.executable, script_path])
 
+# Fonction pour importer les corrections de Napari
+        def import_napari_corrections(e):
+            import tifffile
+            import numpy as np
+            from pipeline import recalculate_with_new_masks
+
+            # Quel fichier est sélectionné ?
+            file_key = file_dropdown.value
+            if not file_key or file_key not in GLOBAL_RESULTS:
+                return
+
+            # Chemin supposé du fichier corrigé par l'utilisateur
+            lbl_path = os.path.join(root, "temp_napari", "labels.tif")
+
+            if not os.path.exists(lbl_path):
+                page.snack_bar = ft.SnackBar(ft.Text("Aucun fichier 'labels.tif' trouvé dans temp_napari. Avez-vous sauvegardé dans Napari ?"))
+                page.snack_bar.open = True
+                page.update()
+                return
+
+            page.snack_bar = ft.SnackBar(ft.Text(f"Importation des corrections pour {file_key}..."))
+            page.snack_bar.open = True
+            page.update()
+
+            try:
+                # 1. Charger les nouveaux masques
+                new_masks_array = tifffile.imread(lbl_path)
+                
+                # Conversion array 3D -> Liste de 2D (format pipeline)
+                new_masks_list = [new_masks_array[i] for i in range(new_masks_array.shape[0])]
+
+                # 2. Retrouver le chemin d'origine pour les métadonnées
+                # On doit reconstruire le chemin complet (un peu hacky mais fonctionnel)
+                cond = GLOBAL_RESULTS[file_key]["condition"]
+                # On cherche dans le dossier root/condition/file_key
+                # Ou on suppose que le nom de fichier est unique
+                full_path = os.path.join(root, cond, file_key) 
+                if not os.path.exists(full_path):
+                    # Fallback : recherche brute
+                    for r, d, f in os.walk(root):
+                        if file_key in f:
+                            full_path = os.path.join(r, file_key)
+                            break
+                
+                # 3. Lancer le recalcul (RAPIDE)
+                new_metrics, new_tracks = recalculate_with_new_masks(full_path, new_masks_list, logger=log)
+
+                # 4. Mettre à jour la mémoire vive
+                # On garde le stack (image), on change le reste
+                GLOBAL_RESULTS[file_key]["masks"] = new_masks_list
+                GLOBAL_RESULTS[file_key]["tracks"] = new_tracks
+                
+                # Mettre à jour les métriques stockées (avec la condition !)
+                new_metrics["condition"] = cond
+                GLOBAL_RESULTS[file_key]["metrics"] = new_metrics
+
+                # 5. Mettre à jour le DataFrame Global (pour les plots)
+                # On reconstruit GLOBAL_FULL_DF à partir de GLOBAL_RESULTS
+                nonlocal GLOBAL_FULL_DF
+                all_mets = [res["metrics"] for res in GLOBAL_RESULTS.values()]
+                GLOBAL_FULL_DF = pd.concat(all_mets, ignore_index=True)
+
+                log(f"✅ Corrections appliquées pour {file_key} !")
+                
+                # 6. Rafraîchir l'interface
+                refresh_view(file_key)
+
+            except Exception as ex:
+                log(f"[ERREUR] Import impossible : {ex}")
+                import traceback
+                log(traceback.format_exc())
+
         global_actions = ft.Row([
              ft.ElevatedButton("📈 Courbes Interactives", on_click=show_graphs, icon="show_chart"),
              ft.ElevatedButton("⚖️ Comparer Résultats", on_click=show_comparison, icon="compare_arrows"),
-             ft.ElevatedButton("🧊 Ouvrir Napari (3D)", on_click=open_napari_viewer, icon="layers", bgcolor="teal700", color="white")
+             
+             # Groupe Napari
+             ft.Container(
+                 content=ft.Row([
+                     ft.ElevatedButton("🧊 Ouvrir Napari", on_click=open_napari_viewer, icon="layers", bgcolor="teal700", color="white"),
+                     ft.ElevatedButton("📥 Importer Corrections", on_click=import_napari_corrections, icon="file_download", bgcolor="orange700", color="white"),
+                 ], spacing=0),
+                 border=ft.border.all(1, "teal"),
+                 border_radius=5,
+             )
         ])
 
         tracking_tab.controls.append(ft.Container(content=file_dropdown, padding=10))

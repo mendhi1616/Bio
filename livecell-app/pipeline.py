@@ -1032,3 +1032,33 @@ def generate_overlay_preview(path, sigma, min_size, clahe_clip, deep_enhance, lo
 
     if logger: logger("Preview encodée (base64) prête pour affichage Flet.")
     return img_b64
+
+def recalculate_with_new_masks(path, new_masks, logger=None):
+    """
+    Recalcule tout (Tracking, Motion, Metrics) à partir de masques corrigés manuellement.
+    Ne refait PAS la segmentation (rapide).
+    """
+    if logger: logger(f"🔄 Recalcul des métriques pour {os.path.basename(path)}...")
+
+    # 1. Relire métadonnées
+    pixel_size, dt = _read_metadata(path, logger=logger)
+    if pixel_size is None: pixel_size = 0.1
+    if dt is None: dt = 60.0
+
+    # 2. Refaire le Tracking (c'est là que les corrections impactent le lignage)
+    tracks = _track_labels(new_masks, max_dist=20.0, logger=logger)
+
+    if tracks is None or len(tracks) == 0:
+        if logger: logger("[WARN] Tracking vide après correction.")
+        metrics = pd.DataFrame({"file": [os.path.basename(path)]})
+        return metrics, pd.DataFrame()
+
+    # 3. Recalculer Vitesse et Morpho
+    tracks = compute_motion_features(tracks, pixel_size, dt)
+
+    # 4. Recalculer Métriques Globales (Survie, Prolif)
+    metrics = _metrics_from_tracks(tracks)
+    metrics["file"] = os.path.basename(path)
+
+    if logger: logger("✅ Recalcul terminé.")
+    return metrics, tracks
