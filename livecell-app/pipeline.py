@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import tifffile as tiff
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 from scipy import ndimage as ndi, stats
 from scipy.spatial import cKDTree
 from skimage import filters, exposure, measure, morphology
@@ -795,6 +796,55 @@ def plot_curves(results, out_dir="outputs"):
         saved.append(p2)
 
     return saved
+
+def get_interactive_charts(results):
+    """
+    Génère des graphiques interactifs Plotly pour la prolifération et la survie.
+    Retourne une liste d'objets plotly.graph_objects.Figure.
+    """
+    figures = []
+    if results is None or results.empty:
+        return figures
+
+    mean_prolif = results.groupby(["condition","t"])["n_cells"].mean().reset_index()
+    mean_surv = results.groupby(["condition","t"])["survival_frac"].mean().reset_index()
+
+    # Graphique 1 : Prolifération (Toutes conditions)
+    fig_p = go.Figure()
+    for cond in results["condition"].unique():
+        sub = mean_prolif[mean_prolif["condition"] == cond]
+        fig_p.add_trace(go.Scatter(
+            x=sub["t"], y=sub["n_cells"],
+            mode='lines+markers',
+            name=f"Prolifération - {cond}"
+        ))
+    fig_p.update_layout(
+        title="Prolifération Cellulaire (Moyenne)",
+        xaxis_title="Frame (t)",
+        yaxis_title="Nombre de cellules",
+        hovermode="x unified"
+    )
+    figures.append(fig_p)
+
+    # Graphique 2 : Survie (Toutes conditions)
+    fig_s = go.Figure()
+    for cond in results["condition"].unique():
+        sub = mean_surv[mean_surv["condition"] == cond]
+        fig_s.add_trace(go.Scatter(
+            x=sub["t"], y=sub["survival_frac"],
+            mode='lines+markers',
+            name=f"Survie - {cond}"
+        ))
+    fig_s.update_layout(
+        title="Taux de Survie (Moyenne)",
+        xaxis_title="Frame (t)",
+        yaxis_title="Fraction de survie",
+        yaxis=dict(range=[0, 1.05]),
+        hovermode="x unified"
+    )
+    figures.append(fig_s)
+
+    return figures
 
 def _select_sharpest_frame(stack, logger=None):
     from skimage.filters import laplace
