@@ -114,21 +114,19 @@ def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=Fa
     t0 = time.time()
 
     if logger:
-        logger(f"➡️ Fichier: {os.path.basename(path)} — méthode={seg_method} — fast={fast_mode}")
+        logger(f"➡️ Fichier: {os.path.basename(path)} — méthode={seg_method}")
 
     try:
         stack = _load_stack(path, logger=logger)
-
         pixel_size, dt = _read_metadata(path, logger=logger)
-        if pixel_size is None:
-            pixel_size = 0.1
-        if dt is None:
-            dt = 60.0
+        if pixel_size is None: pixel_size = 0.1
+        if dt is None: dt = 60.0
 
         if fast_mode:
-            if logger: logger("Mode Rapide activé : traitement de 1 frame sur 2.")
+            if logger: logger("⚡ Mode Rapide activé.")
             stack = stack[::2]
             dt *= 2.0
+
 
         if seg_method == "auto":
             method = "cellpose" if CELLPOSE_OK else "gam"
@@ -136,10 +134,9 @@ def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=Fa
             method = seg_method
 
         use_gpu = torch.cuda.is_available()
-
         global GLOBAL_MODEL
         if method == "cellpose" and GLOBAL_MODEL is None:
-            if logger: logger("[INFO] Initialisation du modèle Cellpose…")
+            if logger: logger("[INFO] Init Cellpose...")
             GLOBAL_MODEL = CellposeModel(gpu=use_gpu)
 
         labels_list = _segment_stack(
@@ -154,37 +151,19 @@ def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=Fa
             deep_enhance=ADV_PARAMS["deep_enhance"],
         )
 
-        tracks = _track_labels(labels_list, max_dist=45.0, logger=logger)
+        tracks = _track_labels(labels_list, max_dist=45.0, gap_frames=1, logger=logger)
+        tracks = filter_short_tracks(tracks, min_frames=10, logger=logger)
 
         if tracks is None or len(tracks) == 0:
-            if logger:
-                logger("[WARN] Tracking vide.")
-            
+            if logger: logger("[WARN] Tracking vide après filtrage.")
             metrics = pd.DataFrame({"file": [os.path.basename(path)]})
             return metrics, pd.DataFrame(), stack, labels_list, pd.DataFrame()
 
-        def filter_short_tracks(tracks, min_frames=5, logger=None):
-            if tracks is None or tracks.empty:
-                return tracks
-
-            counts = tracks["track_id"].value_counts()
-            
-            valid_ids = counts[counts >= min_frames].index
-            
-            n_removed = len(counts) - len(valid_ids)
-            
-            if n_removed > 0 and logger:
-                logger(f"Nettoyage : {n_removed} pistes courtes supprimées (< {min_frames} frames)")
-                
-            return tracks[tracks["track_id"].isin(valid_ids)].copy()
-
-
         tracks = compute_motion_features(tracks, pixel_size, dt)
-
 
         mitoses = detect_mitosis_events(tracks, max_dist=30.0)
         if not mitoses.empty and logger:
-            logger(f"    Mitoses détectées : {len(mitoses)} événements")
+            logger(f"    🧬 Mitoses : {len(mitoses)} événements")
 
         metrics = _metrics_from_tracks(tracks)
         metrics["file"] = os.path.basename(path)
@@ -193,11 +172,8 @@ def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=Fa
             try:
                 out_dir = os.path.join(os.path.dirname(path), "outputs")
                 os.makedirs(out_dir, exist_ok=True)
-
                 overlay_path = os.path.join(out_dir, "overlay_" + os.path.basename(path) + ".png")
-                
                 mid = len(stack) // 2
-
                 if mid < len(labels_list):
                     fig, ax = plt.subplots()
                     ax.imshow(stack[mid], cmap="gray")
@@ -205,21 +181,14 @@ def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=Fa
                     ax.axis("off")
                     fig.savefig(overlay_path, dpi=160, bbox_inches="tight")
                     plt.close(fig)
-
-                    if logger:
-                        logger(f"🖼 Overlay sauvegardé : {overlay_path}")
-                else:
-                    if logger: logger(f"[WARN] Overlay ignoré : index {mid} hors limites (stack={len(stack)}, masques={len(labels_list)})")
-
-            except Exception as e_img:
-                if logger: logger(f"[WARN] Erreur génération image debug : {e_img}")
+            except Exception: pass
 
         return metrics, tracks, stack, labels_list, mitoses
 
     except Exception as e:
         if logger: 
-            logger(f"[CRASH] Erreur critique dans process_file: {e}")
-            logger(traceback.format_exc()) 
+            logger(f"[CRASH] {e}")
+            logger(traceback.format_exc())
         raise e
 
 
@@ -1029,6 +998,20 @@ def recalculate_with_new_masks(path, new_masks, logger=None):
 
     if logger: logger("✅ Recalcul terminé.")
     return metrics, tracks
+
+def filter_short_tracks(tracks, min_frames=1, logger=None):
+    if tracks is None or tracks.empty:
+        return tracks
+
+    counts = tracks["track_id"].value_counts()
+    
+    valid_ids = counts[counts >= min_frames].index
+    
+    n_removed = len(counts) - len(valid_ids)
+    
+    if n_removed > 0 and logger:
+        logger(f"Nettoyage : {n_removed} pistes < {min_frames} frames supprimées.")       
+    return tracks[tracks["track_id"].isin(valid_ids)].copy()
 
 def detect_mitosis_events(tracks, max_dist=35.0, relative_area_tol=0.5):
     events = []
