@@ -853,6 +853,7 @@ def main(page: ft.Page):
 
             columns = [
                 "track_id", "t", "x", "y",
+                "speed_um_s", "mean_speed_track",
                 "speed_um_s", "cum_distance_um",
                 "area_um2", "circularity", "eccentricity",
                 "aspect_ratio", "solidity", "feret_max_um", "angle_deg", "straightness",

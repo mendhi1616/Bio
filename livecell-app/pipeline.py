@@ -633,6 +633,7 @@ def compute_motion_features(tracks, pixel_size, dt):
     tracks["cum_distance_um"] = tracks.groupby("track_id")["distance_um"].cumsum()
     tracks["speed"] = tracks["speed_um_s"]
     tracks["cum_distance"] = tracks["cum_distance_um"]
+    tracks["mean_speed_track"] = tracks.groupby("track_id")["speed_um_s"].transform('mean')
     tracks["area_um2"] = tracks["area"] * (pixel_size ** 2)
     tracks["perimeter_um"] = tracks["perimeter"] * pixel_size
     tracks["circularity"] = np.nan
