@@ -114,23 +114,16 @@ def check_and_register_on_start(username_hint=None, ui_notify=None):
 
 
 def draw_annotated_frame(img_orig, t, df, masks, mitoses=None):
-    """
-    Dessine les contours, tracks, IDs et événements de mitose sur une frame donnée.
-    Retourne une image BGR prête pour OpenCV/VideoWriter/Display.
-    """
     import cv2
     import numpy as np
 
     img = img_orig.copy()
-    # Convert normalized float [0,1] to uint8 [0,255]
     if img.dtype != 'uint8':
          img = (img * 255).astype('uint8')
 
-    # Ensure image is RGB (or at least 3 channels)
     if len(img.shape) == 2:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
-    # 1) DESSINER LES MASQUES
     if masks is not None and len(masks) > t:
         mask = masks[t]
         if mask is not None:
@@ -139,12 +132,9 @@ def draw_annotated_frame(img_orig, t, df, masks, mitoses=None):
                 if lbl == 0: continue
                 bmask = (mask == lbl).astype(np.uint8)
                 contours, _ = cv2.findContours(bmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                # Green contours
                 cv2.drawContours(img, contours, -1, (0, 255, 0), 1)
 
-    # 2) DESSINER LES QUEUES (TAILS)
     if df is not None and not df.empty:
-        # Filter history <= t
         history_df = df[df["t"] <= t]
         present_ids = df[df["t"] == t]["track_id"].unique()
 
@@ -156,10 +146,8 @@ def draw_annotated_frame(img_orig, t, df, masks, mitoses=None):
 
             if len(pts) > 1:
                 pts_arr = np.array(pts, np.int32).reshape((-1, 1, 2))
-                # Yellow path
                 cv2.polylines(img, [pts_arr], isClosed=False, color=(0, 255, 255), thickness=2)
 
-        # 3) DESSINER LES POINTS COURANTS
         track_starts = df.groupby("track_id")["t"].min()
         df_t = df[df["t"] == t]
         
@@ -169,24 +157,17 @@ def draw_annotated_frame(img_orig, t, df, masks, mitoses=None):
 
             t_start = track_starts.get(tid, 0)
             age = t - t_start
-            # Cyan if new (<2 frames), Magenta otherwise
             color = (255, 255, 0) if age < 2 else (255, 0, 255)
 
             cv2.circle(img, (x, y), 4, color, 2)
             cv2.putText(img, str(tid), (x+8, y-8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
 
-    # 4) DESSINER LES MITOSES (Nouveau !)
     if mitoses is not None and not mitoses.empty:
-        # On affiche les divisions récentes (ex: arrivées dans les 10 dernières frames)
-        # pour laisser le temps à l'œil de les voir
         recent_mitosis = mitoses[(mitoses["t"] >= t - 10) & (mitoses["t"] <= t)]
-        
         for _, ev in recent_mitosis.iterrows():
             mx, my = int(ev["x"]), int(ev["y"])
-            # Croix rouge pour marquer la division
             cv2.drawMarker(img, (mx, my), (0, 0, 255), cv2.MARKER_STAR, 10, 2)
             cv2.putText(img, "DIV", (mx-10, my-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-
     return img
 
 def generate_video(stack, df, masks, out_path, fps=10, logger=None):
@@ -213,7 +194,7 @@ class TrackViewer(ft.Container):
         super().__init__(
             bgcolor="black",
             padding=10,
-            expand=True, # Prend tout l'écran (Overlay)
+            expand=True, 
             alignment=ft.alignment.center
         )
 
@@ -223,9 +204,6 @@ class TrackViewer(ft.Container):
         self.t = 0
         self.playing = False
         
-        # --- IMAGE ADAPTATIVE ---
-        # expand=True : Prend tout l'espace vertical disponible
-        # fit=CONTAIN : Redimensionne l'image pour qu'elle tienne ENTIÈREMENT dans l'espace
         self.img_display = ft.Image(
             border_radius=5,
             fit=ft.ImageFit.CONTAIN,
@@ -237,24 +215,23 @@ class TrackViewer(ft.Container):
             max=len(stack) - 1,
             value=0,
             on_change=self.on_seek,
-            expand=True # Le slider prend toute la largeur dispo
+            expand=True 
         )
 
         self.play_btn = ft.IconButton(
-            icon=ft.Icons.PLAY_ARROW,  # <--- CORRECTION ICI (Majuscule)
+            icon=ft.Icons.PLAY_ARROW,  
             on_click=self.toggle_play,
             icon_color="white",
             tooltip="Lecture/Pause"
         )
 
         self.close_btn = ft.IconButton(
-            icon=ft.Icons.CLOSE,       # <--- CORRECTION ICI (Majuscule)
+            icon=ft.Icons.CLOSE,      
             on_click=self.close,
             icon_color="red400",
             tooltip="Fermer"
         )
 
-        # Disposition : Contrôles en haut, Image en dessous (qui prend tout le reste)
         self.content = ft.Column(
             [
                 ft.Row(
@@ -270,13 +247,8 @@ class TrackViewer(ft.Container):
 
         self.update_frame()
 
-    # ---------------- FRAME UPDATE ----------------
     def update_frame(self):
-        # Appel à la fonction globale de dessin
-        # On passe None pour mitoses car TrackViewer ne gère pas encore l'affichage des divisions
-        # Si vous voulez afficher les mitoses, il faudra passer 'mitoses' au constructeur
         img_annotated = draw_annotated_frame(self.stack[self.t], self.t, self.df, self.masks)
-        
         import cv2
         _, buf = cv2.imencode(".png", img_annotated)
         img_base64 = base64.b64encode(buf).decode()
@@ -291,7 +263,6 @@ class TrackViewer(ft.Container):
 
     def toggle_play(self, e):
         self.playing = not self.playing
-        # <--- CORRECTION ICI (Majuscule pour Icons)
         self.play_btn.icon = ft.Icons.PAUSE if self.playing else ft.Icons.PLAY_ARROW
         self.update()
         if self.playing:
@@ -301,16 +272,14 @@ class TrackViewer(ft.Container):
         import time
         while self.playing:
             self.t = (self.t + 1) % len(self.stack)
-            # Mise à jour thread-safe du slider
             self.slider.value = self.t
             self.update_frame()
-            time.sleep(0.1) # Vitesse de lecture
+            time.sleep(0.1) 
 
     def close(self, e):
         self.playing = False
         self.visible = False
         self.update()
-        # On retire l'overlay pour nettoyer
         self.page.overlay.remove(self)
         self.page.update()
 
@@ -361,10 +330,8 @@ def main(page: ft.Page):
     conditions_panel = ft.Column()
     condition_checkboxes: Dict[str, List[ft.Checkbox]] = {}
 
-    # --- GLOBAL DATA STORES ---
     GLOBAL_RESULTS = {}
     GLOBAL_FULL_DF = None
-    # Par défaut dans outputs, mais changera à chaque analyse
     CURRENT_OUTPUT_DIR = os.path.join(data_root.value, "outputs")
 
     global tracking_tab
@@ -459,8 +426,7 @@ def main(page: ft.Page):
 
     auto_preview_check = ft.Switch(label="Aperçu automatique (ON/OFF)", value=True)
 
-    # Option "Mode Rapide" pour l'analyse
-    fast_mode_check = ft.Switch(label="⚡ Mode Rapide (1 frame sur 2)", value=False)
+    fast_mode_check = ft.Switch(label="Mode Rapide (1 frame sur 2)", value=False)
 
     pick_btn = ft.ElevatedButton(
         "Charger une image (TIF / PNG / JPG)",
@@ -471,7 +437,6 @@ def main(page: ft.Page):
         ),
     )
 
-# Variable d'état pour savoir si on vient de charger un nouveau fichier
     file_just_loaded = False
 
     def on_file_picked(e: ft.FilePickerResultEvent):
@@ -481,7 +446,6 @@ def main(page: ft.Page):
             preview_file_path = e.files[0].path or e.files[0].name
             picked_path_text.value = f"Fichier sélectionné : {os.path.basename(preview_file_path)}"
             
-            # On marque qu'on vient de charger un fichier -> Mode "Auto" pour la première frame
             file_just_loaded = True
             
             page.update()
@@ -491,8 +455,7 @@ def main(page: ft.Page):
             picked_path_text.value = "Aucun fichier chargé."
             preview_img.src = None
             preview_img.src_base64 = None
-            
-            # On désactive le slider si aucun fichier
+        
             frame_slider.disabled = True
             frame_slider.label = "Frame"
             page.update()
@@ -502,8 +465,6 @@ def main(page: ft.Page):
     _preview_timer = None
     def debounce_preview():
         nonlocal _preview_timer
-        # On vérifie si l'aperçu auto est activé (auto_preview_switch ou auto_preview_check selon votre code)
-        # Ici on utilise auto_preview_check comme dans votre snippet
         if not auto_preview_check.value:
             return
             
@@ -525,21 +486,17 @@ def main(page: ft.Page):
             spinner.visible = True
             page.update()
 
-            # --- LOGIQUE DE NAVIGATION FRAME ---
-            # Si on vient de charger le fichier -> req_frame = None (Laisse pipeline choisir la plus nette)
-            # Sinon -> On prend la valeur actuelle du slider
             req_frame = None
             if not file_just_loaded:
                 req_frame = int(frame_slider.value)
 
-            # Appel à generate_overlay_preview (Note: renvoie maintenant 3 valeurs)
             img_b64, n_total, used_idx = generate_overlay_preview(
                 preview_file_path,
                 sigma=float(sigma_slider.value),
                 min_size=int(min_size_slider.value),
                 clahe_clip=float(clahe_slider.value),
                 deep_enhance=bool(deep_check.value),
-                frame_index=req_frame,  # <--- Nouvel argument
+                frame_index=req_frame, 
                 logger=log,
             )
 
@@ -547,7 +504,6 @@ def main(page: ft.Page):
                 preview_img.src_base64 = img_b64
                 preview_img.src = None 
                 
-                # --- MISE À JOUR DU SLIDER ---
                 if n_total > 1:
                     frame_slider.min = 0
                     frame_slider.max = n_total - 1
@@ -556,14 +512,12 @@ def main(page: ft.Page):
                     frame_slider.label = f"Frame {used_idx+1} / {n_total}"
                     frame_slider.disabled = False
                 else:
-                    # Image unique
                     frame_slider.min = 0
                     frame_slider.max = 0
                     frame_slider.value = 0
                     frame_slider.label = "1/1"
                     frame_slider.disabled = True
 
-                # On a fini l'initialisation, les prochains appels suivront le slider
                 file_just_loaded = False
 
                 preview_img.update()
@@ -585,7 +539,7 @@ def main(page: ft.Page):
     auto_preview_switch = ft.Switch(
         label="Aperçu automatique (ON/OFF)",
         value=True,
-        on_change=lambda e: log("🧩 Aperçu automatique : " + ("activé" if e.control.value else "désactivé"))
+        on_change=lambda e: log("Aperçu automatique : " + ("activé" if e.control.value else "désactivé"))
     )
 
     def on_slider_change(e):
@@ -609,16 +563,16 @@ def main(page: ft.Page):
     frame_slider = ft.Slider(
         min=0, max=1, value=0, divisions=1,
         label="Frame {value}",
-        on_change=lambda e: debounce_preview(), # Met à jour la preview quand on bouge
-        disabled=True # Désactivé tant qu'il n'y a pas de fichier
+        on_change=lambda e: debounce_preview(),
+        disabled=True 
     )
     frame_text = ft.Text("Navigation Frame", width=180)
 
     min_text = ft.Text("Taille minimale (px)", width=180)
     min_size_slider = ft.Slider(
         min=5, 
-        max=2000,       # <--- MODIFICATION ICI (C'était 500, mettez 2000)
-        divisions=200,  # Augmentez aussi un peu les divisions pour la fluidité
+        max=2000,       
+        divisions=200, 
         value=float(ADV_PARAMS["min_size"]),
         label=f"{ADV_PARAMS['min_size']:.0f}",
         on_change=on_slider_change,
@@ -692,20 +646,12 @@ def main(page: ft.Page):
         spacing=8,
     )
 
-    # ----------------------------------------------------------------------
-    # TRACKING TAB container (vide au départ)
-    # ----------------------------------------------------------------------
     tracking_tab = ft.Column([], scroll=ft.ScrollMode.AUTO)
 
-    # ----------------------------------------------------------------------
-    # BOUTON LANCER ANALYSE (icône Flet compatible)
-    # ----------------------------------------------------------------------
     run_btn = ft.ElevatedButton(
         "Lancer l'analyse",
         icon=ft.Icon(name="play_arrow"),
     )
-
-
 
     def toggle_ui(enabled: bool):
         for ctrl in [
@@ -716,10 +662,6 @@ def main(page: ft.Page):
         page.update()
 
 
-
-    # ----------------------------------------------------------------------
-    # UTILITAIRES UI (définis hors de run_analysis pour éviter scope issues)
-    # ----------------------------------------------------------------------
     def save_csv_callback(e, df):
         if e.path and df is not None:
              try:
@@ -744,7 +686,6 @@ def main(page: ft.Page):
             page.snack_bar.open = True
             page.update()
 
-            # Run in thread to avoid freezing UI
             def _thread_target():
                 try:
                     generate_video(stack, df, masks, out_path, fps=10, logger=print)
@@ -756,9 +697,6 @@ def main(page: ft.Page):
 
     video_save_picker.on_result = video_save_callback
 
-    # ----------------------------------------------------------------------
-    # LANCEMENT DE L'ANALYSE
-    # ----------------------------------------------------------------------
     def run_analysis(e=None):
         nonlocal GLOBAL_RESULTS, GLOBAL_FULL_DF, CURRENT_OUTPUT_DIR
         root = data_root.value.strip()
@@ -787,15 +725,12 @@ def main(page: ft.Page):
         total_files = sum(len(v) for v in selection.values())
         
         if total_files == 1:
-            # Si un seul fichier : Nom_du_fichier_Date
             first_file = list(selection.values())[0][0]
             base_name = os.path.splitext(os.path.basename(first_file))[0]
             run_folder_name = f"{timestamp}_{base_name}"
         else:
-            # Si plusieurs : Date_Batch
             run_folder_name = f"{timestamp}_Batch_{total_files}files"
 
-        # On met à jour le dossier de sortie pour cette session
         CURRENT_OUTPUT_DIR = os.path.join(root, "outputs", run_folder_name)
         os.makedirs(CURRENT_OUTPUT_DIR, exist_ok=True)
         
@@ -823,13 +758,10 @@ def main(page: ft.Page):
 
                 try:
                     fname = os.path.basename(pth)
-                    
-                    # 1. Analyse (avec le nouveau filtre intégré dans process_file)
                     metrics, tracks, current_stack, current_masks, mitoses = process_file(
                         pth, seg_method=method, logger=log, debug=False, fast_mode=use_fast
                     )
 
-                    # 2. Stockage Mémoire
                     GLOBAL_RESULTS[fname] = {
                         "tracks": tracks,
                         "stack": current_stack,
@@ -839,7 +771,6 @@ def main(page: ft.Page):
                         "condition": cond
                     }
 
-                    # 3. Auto-Save
                     img_dir = os.path.dirname(pth)
                     save_dir = os.path.join(img_dir, "results_auto")
                     os.makedirs(save_dir, exist_ok=True)
@@ -850,12 +781,9 @@ def main(page: ft.Page):
                     
                     metrics.to_csv(os.path.join(save_dir, f"{base_name}_metrics.csv"), index=False)
 
-                    # 4. Append metrics for global plotting
                     metrics["condition"] = cond
                     all_results_meta.append(metrics)
 
-                    # --- 5. AFFICHAGE DU NOMBRE RÉEL DE CELLULES ---
-                    # On compte les ID uniques dans le tracking, pas la somme des frames
                     if tracks is not None and not tracks.empty:
                         n_unique = tracks["track_id"].nunique()
                         log(f"✅ {fname} : {n_unique} cellules uniques suivies.")
@@ -882,9 +810,6 @@ def main(page: ft.Page):
         GLOBAL_FULL_DF = pd.concat(all_results_meta, ignore_index=True)
         log(f"Résultats globaux : {len(GLOBAL_FULL_DF)} lignes de métriques.")
 
-        # ----------------------------------------------------------------------
-        # TRACKING — SETUP UI with File Selector
-        # ----------------------------------------------------------------------
         tracking_tab = tabs.tabs[2].content
         tracking_tab.controls.clear()
 
@@ -894,7 +819,6 @@ def main(page: ft.Page):
             tracking_tab.update()
             return
 
-        # Default to first file
         current_file_key = file_options[0].key
 
         file_dropdown = ft.Dropdown(
@@ -904,7 +828,6 @@ def main(page: ft.Page):
             width=400,
         )
 
-        # Containers for dynamic content
         table_container = ft.Column(expand=True, scroll=ft.ScrollMode.AUTO)
         actions_container = ft.Row()
 
@@ -925,7 +848,6 @@ def main(page: ft.Page):
                 tracking_tab.update()
                 return
 
-            # --- TABLE GENERATION (Reused logic) ---
             columns = [
                 "track_id", "t", "x", "y",
                 "speed_um_s", "cum_distance_um",
@@ -933,7 +855,6 @@ def main(page: ft.Page):
                 "aspect_ratio", "solidity", "feret_max_um", "angle_deg", "straightness",
             ]
 
-            # Pagination logic closure
             rows_per_page = 50
             current_page = [0]
             total_rows = len(df)
@@ -986,10 +907,8 @@ def main(page: ft.Page):
             table_container.controls.append(table)
             tracking_tab.update()
 
-            # Now render rows after table is on page
             update_table_rows()
 
-            # --- ACTIONS ---
             def open_viewer_click(e):
                 if stack is None: return
                 viewer = TrackViewer(stack, df, masks=masks)
@@ -997,18 +916,15 @@ def main(page: ft.Page):
                 page.update()
 
             def export_current_csv(e):
-                save_file_picker.data = df # Pass df to picker via data or closure
+                save_file_picker.data = df 
                 save_file_picker.save_file(
                     dialog_title=f"Sauvegarder {file_key}.csv",
                     file_name=f"{file_key}_tracking.csv",
                     allowed_extensions=["csv"]
                 )
 
-            # HACK: We attach the current DF to the picker in a closure or external ref
-            # Better: define specific handler
             save_file_picker.on_result = lambda e: save_csv_callback(e, df)
 
-            # --- VIDEO EXPORT ---
             def export_video_click(e):
                 video_save_picker.data = {
                     "stack": stack,
@@ -1033,11 +949,8 @@ def main(page: ft.Page):
 
         file_dropdown.on_change = on_file_change
 
-        # --- GLOBAL ACTIONS DEFINITION (moved before render) ---
         out_dir = os.path.join(root, "outputs")
 
-
-        # --- GESTION DES GRAPHIQUES (Version Infaillible : Base64 Image) ---
         def show_graphs(e):
             import importlib
             import pipeline
@@ -1049,18 +962,15 @@ def main(page: ft.Page):
                 page.snack_bar.open = True
                 page.update()
 
-                # 1. Vérifier les données
                 if GLOBAL_FULL_DF is None or GLOBAL_FULL_DF.empty:
                     page.snack_bar = ft.SnackBar(ft.Text("Aucune donnée à afficher. Lancez une analyse d'abord !", color="red"))
                     page.snack_bar.open = True
                     page.update()
                     return
 
-                # 2. Recharger pipeline
                 importlib.reload(pipeline)
                 from pipeline import plot_curves
 
-                # 3. Récupérer les figures
                 figs_data = plot_curves(GLOBAL_FULL_DF, out_dir=CURRENT_OUTPUT_DIR)
 
                 dlg_content = ft.Column(scroll=ft.ScrollMode.AUTO, height=600, width=900)
@@ -1071,21 +981,17 @@ def main(page: ft.Page):
                     )
                 else:
                     for title, fig in figs_data:
-                        # --- CONVERSION FIGURE -> IMAGE BASE64 ---
-                        # C'est cette étape qui remplace MatplotlibChart et évite le crash
                         buf = io.BytesIO()
                         fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
                         buf.seek(0)
                         img_b64 = base64.b64encode(buf.read()).decode("utf-8")
                         
-                        # On crée une image Flet
                         chart_img = ft.Image(
                             src_base64=img_b64,
                             fit=ft.ImageFit.CONTAIN,
                             expand=True
                         )
 
-                        # On l'ajoute dans le container
                         chart_container = ft.Container(
                             content=chart_img,
                             height=450, 
@@ -1116,7 +1022,6 @@ def main(page: ft.Page):
                 import traceback
                 log(traceback.format_exc())
 
-        # --- COMPARAISON DES RÉSULTATS (Version Corrigée) ---
         def show_comparison(e):
             try:
                 files = list(GLOBAL_RESULTS.keys())
@@ -1154,7 +1059,6 @@ def main(page: ft.Page):
                             result_area.update()
                             return
 
-                        # Stats
                         col_s = "speed_um_s" if "speed_um_s" in df1.columns else "speed"
                         s1 = df1[col_s].mean() if col_s in df1.columns else 0
                         s2 = df2[col_s].mean() if col_s in df2.columns else 0
@@ -1197,7 +1101,6 @@ def main(page: ft.Page):
                 log(traceback.format_exc())
 
 
-# Napari Bridge Function
         def open_napari_viewer(e):
             import numpy as np
             import tifffile
@@ -1223,7 +1126,6 @@ def main(page: ft.Page):
             img_path = os.path.join(temp_dir, "img.tif")
             lbl_path = os.path.join(temp_dir, "labels.tif")
 
-            # Sauvegarde
             tifffile.imwrite(img_path, stack)
             if masks is not None:
                 lbl_stack = np.array(masks, dtype=np.int32)
@@ -1231,8 +1133,6 @@ def main(page: ft.Page):
             else:
                 if os.path.exists(lbl_path): os.remove(lbl_path)
 
-            # --- SCRIPT GÉNÉRÉ ---
-            # On force ndisplay=2 pour dire "C'est de la 2D + Temps, pas de la 3D volumétrique"
             script_code = f"""
 import napari
 import tifffile
@@ -1266,18 +1166,15 @@ if __name__ == '__main__':
 
             subprocess.Popen([sys.executable, script_path])
 
-# Fonction pour importer les corrections de Napari
         def import_napari_corrections(e):
             import tifffile
             import numpy as np
             from pipeline import recalculate_with_new_masks
 
-            # Quel fichier est sélectionné ?
             file_key = file_dropdown.value
             if not file_key or file_key not in GLOBAL_RESULTS:
                 return
 
-            # Chemin supposé du fichier corrigé par l'utilisateur
             lbl_path = os.path.join(root, "temp_napari", "labels.tif")
 
             if not os.path.exists(lbl_path):
@@ -1291,46 +1188,31 @@ if __name__ == '__main__':
             page.update()
 
             try:
-                # 1. Charger les nouveaux masques
                 new_masks_array = tifffile.imread(lbl_path)
-                
-                # Conversion array 3D -> Liste de 2D (format pipeline)
                 new_masks_list = [new_masks_array[i] for i in range(new_masks_array.shape[0])]
 
-                # 2. Retrouver le chemin d'origine pour les métadonnées
-                # On doit reconstruire le chemin complet (un peu hacky mais fonctionnel)
                 cond = GLOBAL_RESULTS[file_key]["condition"]
-                # On cherche dans le dossier root/condition/file_key
-                # Ou on suppose que le nom de fichier est unique
                 full_path = os.path.join(root, cond, file_key) 
                 if not os.path.exists(full_path):
-                    # Fallback : recherche brute
                     for r, d, f in os.walk(root):
                         if file_key in f:
                             full_path = os.path.join(r, file_key)
                             break
                 
-                # 3. Lancer le recalcul (RAPIDE)
                 new_metrics, new_tracks = recalculate_with_new_masks(full_path, new_masks_list, logger=log)
 
-                # 4. Mettre à jour la mémoire vive
-                # On garde le stack (image), on change le reste
                 GLOBAL_RESULTS[file_key]["masks"] = new_masks_list
                 GLOBAL_RESULTS[file_key]["tracks"] = new_tracks
                 
-                # Mettre à jour les métriques stockées (avec la condition !)
                 new_metrics["condition"] = cond
                 GLOBAL_RESULTS[file_key]["metrics"] = new_metrics
 
-                # 5. Mettre à jour le DataFrame Global (pour les plots)
-                # On reconstruit GLOBAL_FULL_DF à partir de GLOBAL_RESULTS
                 nonlocal GLOBAL_FULL_DF
                 all_mets = [res["metrics"] for res in GLOBAL_RESULTS.values()]
                 GLOBAL_FULL_DF = pd.concat(all_mets, ignore_index=True)
 
                 log(f"✅ Corrections appliquées pour {file_key} !")
                 
-                # 6. Rafraîchir l'interface
                 refresh_view(file_key)
 
             except Exception as ex:
@@ -1342,7 +1224,6 @@ if __name__ == '__main__':
              ft.ElevatedButton("📈 Courbes Interactives", on_click=show_graphs, icon="show_chart"),
              ft.ElevatedButton("⚖️ Comparer Résultats", on_click=show_comparison, icon="compare_arrows"),
              
-             # Groupe Napari
              ft.Container(
                  content=ft.Row([
                      ft.ElevatedButton("🧊 Ouvrir Napari", on_click=open_napari_viewer, icon="layers", bgcolor="teal700", color="white"),

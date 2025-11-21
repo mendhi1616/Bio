@@ -39,12 +39,6 @@ import tifffile
 import re
 
 def _read_metadata(path, logger=None):
-    """
-    Lecture robuste des métadonnées TIF :
-    - pixel_size (µm/pixel)
-    - dt (sec par frame)
-    """
-
     pixel_size = None
     dt = None
 
@@ -56,7 +50,6 @@ def _read_metadata(path, logger=None):
             if logger:
                 logger("------- METADATA RAW -------")
 
-            # ---- Lire texte brut ----
             if desc_tag is not None:
                 desc_value = desc_tag.value
                 if isinstance(desc_value, bytes):
@@ -69,11 +62,9 @@ def _read_metadata(path, logger=None):
                     logger("Aucune ImageDescription trouvée.")
 
 
-            # Si vide → impossible de parser
             if not desc_value:
                 return None, None
 
-            # -------- Pixel Size --------
             patterns_px = [
                 r"PixelSizeUm\s*=\s*([\d\.]+)",
                 r"pixel_size\s*=\s*([\d\.]+)",
@@ -88,11 +79,10 @@ def _read_metadata(path, logger=None):
                     pixel_size = float(m.group(1))
                     break
 
-            # -------- Time per frame --------
             patterns_dt = [
                 r"FrameTime\s*=\s*([\d\.]+)",
                 r"TimeIncrement\s*=\s*([\d\.]+)",
-                r"finterval\s*=\s*([\d\.]+)",   # ImageJ !!!
+                r"finterval\s*=\s*([\d\.]+)",   
                 r"dt\s*=\s*([\d\.]+)",
                 r"Interval_ms\s*=\s*([\d\.]+)",
                 r"ExposureTime\s*=\s*([\d\.]+)",
@@ -108,7 +98,6 @@ def _read_metadata(path, logger=None):
         if logger:
             logger(f"[WARN] Impossible de lire les métadonnées ({e})")
 
-    # Convert ms → seconds si trop grand
     if dt is not None and dt > 5:
         dt = dt / 1000.0
 
@@ -121,45 +110,38 @@ from cellpose.models import CellposeModel
 GLOBAL_MODEL = None
 
 def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=False):
-    import traceback # Nécessaire pour afficher les détails du crash
+    import traceback
     t0 = time.time()
 
     if logger:
         logger(f"➡️ Fichier: {os.path.basename(path)} — méthode={seg_method} — fast={fast_mode}")
 
     try:
-        # --- Charger stack ---
         stack = _load_stack(path, logger=logger)
 
-        # --- Lire métadonnées (pixel_size, dt) ---
         pixel_size, dt = _read_metadata(path, logger=logger)
         if pixel_size is None:
             pixel_size = 0.1
         if dt is None:
             dt = 60.0
 
-        # --- FAST MODE : 1 frame sur 2 ---
         if fast_mode:
-            if logger: logger("⚡ Mode Rapide activé : traitement de 1 frame sur 2.")
+            if logger: logger("Mode Rapide activé : traitement de 1 frame sur 2.")
             stack = stack[::2]
             dt *= 2.0
 
-        # --- Choix méthode ---
         if seg_method == "auto":
             method = "cellpose" if CELLPOSE_OK else "gam"
         else:
             method = seg_method
 
-        # --- GPU ---
         use_gpu = torch.cuda.is_available()
 
-        # --- Init modèle cellpose (une seule fois) ---
         global GLOBAL_MODEL
         if method == "cellpose" and GLOBAL_MODEL is None:
             if logger: logger("[INFO] Initialisation du modèle Cellpose…")
             GLOBAL_MODEL = CellposeModel(gpu=use_gpu)
 
-        # --- Segmentation ---
         labels_list = _segment_stack(
             stack,
             method=method,
@@ -172,7 +154,6 @@ def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=Fa
             deep_enhance=ADV_PARAMS["deep_enhance"],
         )
 
-        # --- Tracking ---
         tracks = _track_labels(labels_list, max_dist=100.0, logger=logger)
 
         if tracks is None or len(tracks) == 0:
@@ -180,46 +161,34 @@ def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=Fa
                 logger("[WARN] Tracking vide.")
             
             metrics = pd.DataFrame({"file": [os.path.basename(path)]})
-            # --- CORRECTION : On retourne 5 valeurs (metrics, tracks, stack, masks, mitoses) ---
-            # Le dernier pd.DataFrame() vide correspond aux mitoses
             return metrics, pd.DataFrame(), stack, labels_list, pd.DataFrame()
 
         def filter_short_tracks(tracks, min_frames=5, logger=None):
-            """
-            Supprime les trajectoires trop courtes (souvent du bruit ou des débris).
-            """
             if tracks is None or tracks.empty:
                 return tracks
 
-            # Compter le nombre de points pour chaque track_id
             counts = tracks["track_id"].value_counts()
             
-            # Garder uniquement les IDs qui ont assez de points
             valid_ids = counts[counts >= min_frames].index
             
             n_removed = len(counts) - len(valid_ids)
             
             if n_removed > 0 and logger:
-                logger(f"    🧹 Nettoyage : {n_removed} pistes courtes supprimées (< {min_frames} frames)")
+                logger(f"Nettoyage : {n_removed} pistes courtes supprimées (< {min_frames} frames)")
                 
-            # Filtrer le DataFrame
             return tracks[tracks["track_id"].isin(valid_ids)].copy()
 
 
-        # --- Motion features ---
         tracks = compute_motion_features(tracks, pixel_size, dt)
 
 
-        # --- AJOUT : Détection Mitoses ---
         mitoses = detect_mitosis_events(tracks, max_dist=30.0)
         if not mitoses.empty and logger:
-            logger(f"    🧬 Mitoses détectées : {len(mitoses)} événements")
+            logger(f"    Mitoses détectées : {len(mitoses)} événements")
 
-        # --- Metrics ---
         metrics = _metrics_from_tracks(tracks)
         metrics["file"] = os.path.basename(path)
 
-        # --- Debug overlay ---
         if debug:
             try:
                 out_dir = os.path.join(os.path.dirname(path), "outputs")
@@ -229,7 +198,6 @@ def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=Fa
                 
                 mid = len(stack) // 2
 
-                # --- CORRECTION 2 : Sécurité Index Overlay ---
                 if mid < len(labels_list):
                     fig, ax = plt.subplots()
                     ax.imshow(stack[mid], cmap="gray")
@@ -246,14 +214,12 @@ def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=Fa
             except Exception as e_img:
                 if logger: logger(f"[WARN] Erreur génération image debug : {e_img}")
 
-        # --- FIN ---
         return metrics, tracks, stack, labels_list, mitoses
 
     except Exception as e:
-        # --- CORRECTION 3 : Gestion globale des crashs ---
         if logger: 
             logger(f"[CRASH] Erreur critique dans process_file: {e}")
-            logger(traceback.format_exc()) # Affiche la ligne exacte de l'erreur
+            logger(traceback.format_exc()) 
         raise e
 
 
@@ -359,7 +325,6 @@ def _segment_frame_cellpose(img, logger=None):
     if img.ndim != 2:
         raise ValueError(f"_segment_frame_cellpose attend une image 2D, reçu {img.shape}")
 
-    # Normalisation
     i_min, i_max = float(img.min()), float(img.max())
     if i_max > i_min:
         img = (img - i_min) / (i_max - i_min)
@@ -370,16 +335,13 @@ def _segment_frame_cellpose(img, logger=None):
         raise RuntimeError("GLOBAL_MODEL non initialisé.")
 
     try:
-        # ---- Appel Cellpose = compatible v3/v4/v5 ----
         pred = GLOBAL_MODEL.eval(img, channels=[0, 0])
-
-        # ---- Format compatible toutes versions ----
         if isinstance(pred, dict):
             masks = pred.get("masks", None)
         elif isinstance(pred, (list, tuple)):
-            masks = pred[0]  # v3/v4
+            masks = pred[0]  
         else:
-            masks = pred  # fallback
+            masks = pred  
 
         if masks is None:
             if logger: logger("[WARN] Cellpose n’a retourné aucun masque.")
@@ -427,7 +389,6 @@ def _segment_stack(stack, method="gam", logger=None, **kwargs):
     from skimage import morphology 
     import numpy as np
     
-    # On fait taire les warnings de Cellpose
     logging.getLogger("cellpose").setLevel(logging.ERROR)
 
     labels_list = []
@@ -438,9 +399,6 @@ def _segment_stack(stack, method="gam", logger=None, **kwargs):
     if method == "auto":
         method = "cellpose" if CELLPOSE_OK else "gam"
 
-    # =========================================================
-    # MODE CELLPOSE (Optimisé : 75% de la taille + FILTRE)
-    # =========================================================
     if method == "cellpose" and CELLPOSE_OK:
         global GLOBAL_MODEL
         use_gpu = torch.cuda.is_available() if TORCH_OK else False
@@ -451,22 +409,18 @@ def _segment_stack(stack, method="gam", logger=None, **kwargs):
 
         try:
             h, w = stack.shape[-2:]
-            
-            # --- REGLAGE DU SCALE ---
             scale = 0.75 if (h > 800 or w > 800) else 1.0
             diam = 30.0 * scale
 
             if logger and scale != 1.0: 
                 logger(f"Turbo activé: Analyse à {int(scale*100)}% de la taille")
 
-            # 1. PREPARATION RAPIDE
             inputs = [
                 cv2.resize(img, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA) 
                 if scale != 1.0 else img
                 for img in stack
             ]
 
-            # 2. BATCH PROCESSING
             chunk_size = 50
             
             for i in range(0, len(inputs), chunk_size):
@@ -475,7 +429,6 @@ def _segment_stack(stack, method="gam", logger=None, **kwargs):
                 if logger: 
                     logger(f"    ... Cellpose: {i+1}-{min(i+chunk_size, len(inputs))}/{len(inputs)}")
 
-                # Inference
                 res = GLOBAL_MODEL.eval(
                     batch, 
                     batch_size=16, 
@@ -487,7 +440,6 @@ def _segment_stack(stack, method="gam", logger=None, **kwargs):
                 masks = res[0] if isinstance(res, tuple) else res
                 masks = masks if isinstance(masks, list) else [masks[k] for k in range(masks.shape[0])]
 
-                # 3. UPSAMPLING (Remettre à la taille originale)
                 if scale != 1.0:
                     resized = [
                         cv2.resize(m.astype(np.int32), (w, h), interpolation=cv2.INTER_NEAREST) 
@@ -504,17 +456,14 @@ def _segment_stack(stack, method="gam", logger=None, **kwargs):
 
         except Exception as e:
             if logger: logger(f"[ERREUR] Batch échoué ({e}) -> Fallback frame-by-frame.")
-            # Fallback manuel
             labels_list = []
             for frame in stack:
                 labels_list.append(_segment_frame_cellpose(frame, logger=None))
 
-        # --- 4. NETTOYAGE DES DÉBRIS (Commun au mode Batch et Fallback) ---
         min_sz = kwargs.get("min_size", ADV_PARAMS["min_size"])
         
         if min_sz > 1 and labels_list:
-            if logger: logger(f"    🧹 Nettoyage des débris < {min_sz} px")
-            # Optimisation : List Comprehension
+            if logger: logger(f"   Nettoyage des débris < {min_sz} px")
             labels_list = [
                 morphology.remove_small_objects(m, min_size=min_sz).astype(np.int32)
                 for m in labels_list
@@ -522,9 +471,6 @@ def _segment_stack(stack, method="gam", logger=None, **kwargs):
 
         return labels_list
 
-    # =========================================================
-    # MODE GAM++ (Classique)
-    # =========================================================
     deep = kwargs.get("deep_enhance", ADV_PARAMS["deep_enhance"])
     
     for t, frame in enumerate(stack):
@@ -560,7 +506,6 @@ def _props_from_labels(labels):
 
     df = pd.DataFrame(props)
 
-    # Renommer coordonnées
     df.rename(columns={"centroid-0": "y", "centroid-1": "x"}, inplace=True)
 
     return df
@@ -592,43 +537,34 @@ def _track_labels(labels_list, max_dist=15.0, logger=None, gap_frames=2):
 
     tracks = []
     prev = None
-    track_end = {}      # track_id → (x, y, t)
-    pending_start = {}  # new objects to try reconnect
+    track_end = {}     
+    pending_start = {}  
 
     next_track_id = 1
-
-    # Colonnes qu'on veut garder dans le résultat final
     cols_to_keep = [
         "t", "label", "x", "y", "area", "perimeter",
         "eccentricity", "major_axis_length", "minor_axis_length",
         "solidity", "feret_diameter_max", "track_id"
     ]
 
-    # -----------------------
-    # PASS 1 : LAP frame-to-frame
-    # -----------------------
     for t, lab in enumerate(labels_list):
 
         df = _props_from_labels(lab).copy()
         df["t"] = t
         df.index = pd.Index([f"t{t}_l{int(x)}" for x in df["label"]], name="obj")
 
-        # --- CAS 1 : PREMIÈRE FRAME ---
         if prev is None:
             df["track_id"] = range(next_track_id, next_track_id + len(df))
             for _, row in df.iterrows():
                 track_end[row["track_id"]] = (row["x"], row["y"], t)
             next_track_id += len(df)
             
-            # SÉCURITÉ : On sauvegarde la frame 0 !
             if not df.empty:
                 tracks.append(df[cols_to_keep])
 
             prev = df
             continue
 
-        # --- CAS 2 : FRAMES SUIVANTES ---
-        # Matrice de coût (Distance)
         if len(prev) > 0 and len(df) > 0:
             cost = cdist(prev[["x", "y"]], df[["x", "y"]])
             cost[cost > max_dist] = 1e9
@@ -639,7 +575,6 @@ def _track_labels(labels_list, max_dist=15.0, logger=None, gap_frames=2):
         track_id = pd.Series(np.nan, index=df.index)
         used = set()
 
-        # Assignation des IDs existants via LAP
         for r, c in zip(rows, cols):
             if cost[r, c] < 1e9:
                 p_obj = prev.index[r]
@@ -650,19 +585,16 @@ def _track_labels(labels_list, max_dist=15.0, logger=None, gap_frames=2):
                 used.add(c_obj)
                 track_end[tid] = (df.loc[c_obj, "x"], df.loc[c_obj, "y"], t)
 
-        # Nouveaux objets (non assignés) → pending_start
         for obj in df.index:
             if obj not in used:
                 new_tid = next_track_id
                 next_track_id += 1
 
                 track_id.loc[obj] = new_tid
-                # On stocke (x, y, t, new_tid)
                 pending_start[obj] = (df.loc[obj, "x"], df.loc[obj, "y"], t, new_tid)
 
         df["track_id"] = track_id.values
 
-        # Sauvegarde de la frame courante
         if not df.empty:
             tracks.append(df[cols_to_keep])
 
@@ -672,16 +604,11 @@ def _track_labels(labels_list, max_dist=15.0, logger=None, gap_frames=2):
             logger(f"    • Frames trackées: {t+1}/{len(labels_list)}")
 
 
-    # -----------------------
-    # PASS 2 : GAP CLOSING INTELLIGENT
-    # -----------------------
-
     if logger:
         logger("  ↳ Gap closing (Reconnexion)...")
 
     if pending_start and tracks:
-        # On trie les objets orphelins par temps pour traiter dans l'ordre chrono
-        sorted_pending = sorted(pending_start.items(), key=lambda x: x[1][2]) # x[1][2] est le temps t
+        sorted_pending = sorted(pending_start.items(), key=lambda x: x[1][2]) 
         
         for obj, (x2, y2, t2, new_tid) in sorted_pending:
             best_tid = None
@@ -690,24 +617,16 @@ def _track_labels(labels_list, max_dist=15.0, logger=None, gap_frames=2):
             for tid, (x1, y1, t1) in track_end.items():
                 delta_t = t2 - t1
                 
-                # On cherche dans le passé récent
                 if 1 <= delta_t <= gap_frames:
-                    dist = np.hypot(x2 - x1, y2 - y1)
-                    
-                    # --- AMÉLIORATION CLÉ : DISTANCE DYNAMIQUE ---
-                    # Si on a sauté 2 frames, on a le droit d'avoir bougé 2x plus loin
+                    dist = np.hypot(x2 - x1, y2 - y1)                  
                     dynamic_max_dist = max_dist * delta_t
                     
                     if dist < dynamic_max_dist and dist < best_dist:
                         best_tid = tid
                         best_dist = dist
 
-            # Reconnexion réussie
             if best_tid is not None:
-                # Mise à jour du point de fin de la piste
                 track_end[best_tid] = (x2, y2, t2)
-                
-                # Correction rétroactive de l'ID dans les données sauvegardées
                 for df_track in tracks:
                     mask = df_track["track_id"] == new_tid
                     if mask.any():
@@ -716,9 +635,6 @@ def _track_labels(labels_list, max_dist=15.0, logger=None, gap_frames=2):
                 if logger:
                     logger(f"    ↳ Reconnexion : ID temporaire {new_tid} -> ID {best_tid}")
 
-    # -----------------------
-    # Résultat final (SÉCURISÉ)
-    # -----------------------
     if not tracks:
         if logger: logger("[WARN] Aucune cellule suivie détectée.")
         return pd.DataFrame(columns=cols_to_keep)
@@ -727,59 +643,30 @@ def _track_labels(labels_list, max_dist=15.0, logger=None, gap_frames=2):
     return out
 
 def compute_motion_features(tracks, pixel_size, dt):
-    """
-    Ajout des métriques de mouvement (µm/s) et morphologiques (µm, µm²)
-    pour chaque cellule (track_id, t).
-    """
 
-    # --- ORDONNER PAR CELLULE ET TEMPS ---
     tracks = tracks.sort_values(["track_id", "t"])
 
-    # --- DIFFÉRENCES SPATIALES EN PIXELS ---
     tracks["dx"] = tracks.groupby("track_id")["x"].diff()
     tracks["dy"] = tracks.groupby("track_id")["y"].diff()
 
-    # Distance par frame (en pixels)
     tracks["distance_px"] = np.sqrt(tracks["dx"]**2 + tracks["dy"]**2)
     tracks["distance_px"] = tracks["distance_px"].fillna(0)
 
-    # --- UNITÉS PHYSIQUES ---
-    # sécurité si dt ou pixel_size manquants
     if pixel_size is None or pixel_size <= 0:
         pixel_size = 1.0
     if dt is None or dt <= 0:
         dt = 1.0
 
-    # Conversion en µm
     tracks["distance_um"] = tracks["distance_px"] * pixel_size
-
-    # Vitesse instantanée en µm/s
     tracks["speed_um_s"] = tracks["distance_um"] / dt
-
-    # Composantes de vitesse (µm/s)
     tracks["vx_um_s"] = tracks["dx"] * pixel_size / dt
     tracks["vy_um_s"] = tracks["dy"] * pixel_size / dt
-
-    # Angle du mouvement (0° = vers la droite)
     tracks["angle_deg"] = np.degrees(np.arctan2(tracks["vy_um_s"], tracks["vx_um_s"]))
-
-    # Distance cumulée (µm)
     tracks["cum_distance_um"] = tracks.groupby("track_id")["distance_um"].cumsum()
-
-    # On garde aussi des colonnes compatibles avec ton UI actuelle
     tracks["speed"] = tracks["speed_um_s"]
     tracks["cum_distance"] = tracks["cum_distance_um"]
-
-    # --- FEATURES MORPHOLOGIQUES EN µm / µm² ---
-
-    # Aire (µm²)
     tracks["area_um2"] = tracks["area"] * (pixel_size ** 2)
-
-    # Périmètre (µm)
     tracks["perimeter_um"] = tracks["perimeter"] * pixel_size
-
-    # Circularité
-    # 4π * area / perimeter², en prenant garde aux zéros
     tracks["circularity"] = np.nan
     valid = tracks["perimeter_um"] > 0
     tracks.loc[valid, "circularity"] = (
@@ -787,7 +674,6 @@ def compute_motion_features(tracks, pixel_size, dt):
         (tracks.loc[valid, "perimeter_um"] ** 2)
     )
 
-    # Aspect ratio = major / minor
     tracks["aspect_ratio"] = np.nan
     valid_minor = tracks["minor_axis_length"] > 0
     tracks.loc[valid_minor, "aspect_ratio"] = (
@@ -795,17 +681,8 @@ def compute_motion_features(tracks, pixel_size, dt):
         tracks.loc[valid_minor, "minor_axis_length"]
     )
 
-    # Eccentricité (déjà fournie par regionprops)
-    # On la laisse en l'état : 0 = rond, 1 = très allongé
-
-    # Solidity (déjà fournie, entre 0 et 1)
-    # Rien à changer.
-
-    # Feret max (µm)
     tracks["feret_max_um"] = tracks["feret_diameter_max"] * pixel_size
 
-    # --- Straightness (net / distance cumulée) ---
-    # déplacement net (du premier au dernier point)
     def _net_disp_um(df):
         if len(df) < 2:
             return 0.0
@@ -813,7 +690,6 @@ def compute_motion_features(tracks, pixel_size, dt):
         dy = df["y"].iloc[-1] - df["y"].iloc[0]
         return np.sqrt(dx**2 + dy**2) * pixel_size
 
-    # Correction pour éviter FutureWarning pandas
     net_disp = tracks.groupby("track_id")[["x", "y"]].apply(_net_disp_um)
     tracks["net_displacement_um"] = tracks["track_id"].map(net_disp)
 
@@ -825,7 +701,6 @@ def compute_motion_features(tracks, pixel_size, dt):
     )
 
     return tracks
-
 
 
 def _metrics_from_tracks(tracks):
@@ -874,25 +749,21 @@ def plot_curves(results, out_dir="outputs"):
     from matplotlib.figure import Figure
     import os
     
-    # On s'assure que le dossier de sauvegarde existe
     os.makedirs(out_dir, exist_ok=True)
     
-    figures = [] # Cette liste doit contenir des tuples (Titre, ObjetFigure)
+    figures = [] 
     
     if results is None or results.empty:
         return figures
 
-    # Calcul des moyennes
     mean_prolif = results.groupby(["condition","t"])["n_cells"].mean().reset_index()
     mean_surv = results.groupby(["condition","t"])["survival_frac"].mean().reset_index()
 
     unique_conds = results["condition"].unique()
 
     for cond in unique_conds:
-        # --- Graphique 1 : Prolifération ---
         sub_p = mean_prolif[mean_prolif["condition"]==cond]
         
-        # Création de la Figure Matplotlib
         fig1 = Figure(figsize=(6, 4), dpi=100)
         ax1 = fig1.add_subplot(111)
         ax1.plot(sub_p["t"], sub_p["n_cells"], marker="o", color="tab:blue", label="N cellules")
@@ -902,15 +773,12 @@ def plot_curves(results, out_dir="outputs"):
         ax1.grid(True, linestyle='--', alpha=0.6)
         ax1.legend()
         
-        # IMPORTANT : On ajoute l'objet Figure à la liste
         figures.append((f"Prolifération ({cond})", fig1))
 
-        # On sauvegarde aussi sur le disque (optionnel mais utile)
         try:
             fig1.savefig(os.path.join(out_dir, f"proliferation_{cond}.png"))
         except: pass
 
-        # --- Graphique 2 : Survie ---
         sub_s = mean_surv[mean_surv["condition"]==cond]
         
         fig2 = Figure(figsize=(6, 4), dpi=100)
@@ -923,7 +791,6 @@ def plot_curves(results, out_dir="outputs"):
         ax2.grid(True, linestyle='--', alpha=0.6)
         ax2.legend()
 
-        # IMPORTANT : On ajoute l'objet Figure à la liste
         figures.append((f"Survie ({cond})", fig2))
 
         try:
@@ -933,39 +800,25 @@ def plot_curves(results, out_dir="outputs"):
     return figures
 
 def get_interactive_charts(results):
-    """
-    Génère des graphiques Plotly PRO avec :
-    - Moyenne (Ligne)
-    - Erreur Standard SEM (Ombrage)
-    - Normalisation (Fold Change)
-    """
     import plotly.graph_objects as go
     figures = []
     
     if results is None or results.empty:
         return figures
 
-    # --- 1. PRÉPARATION DES DONNÉES ---
-    # On copie pour ne pas modifier l'original
     df = results.copy()
     
-    # On normalise la prolifération par fichier (Fold Change vs t0)
     def normalize_group(g):
-        # On prend la valeur moyenne à t=min pour ce fichier
         t_min = g["t"].min()
         n0 = g.loc[g["t"] == t_min, "n_cells"].mean()
-        g["n_cells_norm"] = g["n_cells"] / max(1, n0) # Fold Change
+        g["n_cells_norm"] = g["n_cells"] / max(1, n0) 
         return g
 
-    # Appliquer la normalisation par fichier
     try:
         df = df.groupby(["condition", "file"]).apply(normalize_group).reset_index(drop=True)
     except Exception:
-        # Fallback si le groupby échoue
         df["n_cells_norm"] = df["n_cells"]
 
-    # --- 2. CALCUL DES STATS (Moyenne et SEM) ---
-    # On groupe par Condition et Temps
     stats = df.groupby(["condition", "t"]).agg(
         n_mean=("n_cells", "mean"),
         n_sem=("n_cells", "sem"),       
@@ -975,28 +828,24 @@ def get_interactive_charts(results):
         surv_sem=("survival_frac", "sem")
     ).reset_index()
 
-    # Fonction utilitaire pour tracer une courbe avec ombrage (Intervalle de confiance)
     def add_trace_with_error(fig, df_cond, x_col, y_mean_col, y_sem_col, label, color):
         x = df_cond[x_col]
         y = df_cond[y_mean_col]
-        # Gestion des NaN pour l'erreur
         y_err = df_cond[y_sem_col].fillna(0)
         y_upper = y + y_err
         y_lower = y - y_err
 
-        # 1. Zone d'ombrage (Error Band)
         fig.add_trace(go.Scatter(
             x=pd.concat([x, x[::-1]]),
             y=pd.concat([y_upper, y_lower[::-1]]),
             fill='toself',
-            fillcolor=f"rgba({color}, 0.2)", # Opacité 20%
+            fillcolor=f"rgba({color}, 0.2)", 
             line=dict(color='rgba(255,255,255,0)'),
             hoverinfo="skip",
             showlegend=False,
             name=f"{label} (SEM)"
         ))
 
-        # 2. Ligne Moyenne
         fig.add_trace(go.Scatter(
             x=x, y=y,
             mode='lines+markers',
@@ -1004,11 +853,9 @@ def get_interactive_charts(results):
             name=label
         ))
 
-    # Couleurs (Rouge, Bleu, Vert, Orange, Violet)
     colors = ["255,0,0", "0,128,255", "0,128,0", "255,128,0", "128,0,128"]
     unique_conds = stats["condition"].unique()
 
-    # --- GRAPH 1 : PROLIFÉRATION NORMALISÉE ---
     fig_p = go.Figure()
     for i, cond in enumerate(unique_conds):
         sub = stats[stats["condition"] == cond]
@@ -1024,7 +871,6 @@ def get_interactive_charts(results):
     )
     figures.append(fig_p)
 
-    # --- GRAPH 2 : SURVIE ---
     fig_s = go.Figure()
     for i, cond in enumerate(unique_conds):
         sub = stats[stats["condition"] == cond]
@@ -1054,9 +900,9 @@ def auto_adjust_gam_params(path, logger=None):
     stack = _load_stack(path, logger=logger)
     pixel_size, dt = _read_metadata(path, logger=logger)
     if pixel_size is None:
-        pixel_size = 0.1   # µm/pixel par défaut
+        pixel_size = 0.1   
     if dt is None:
-        dt = 60.0          # 60 sec = 1 min par défaut
+        dt = 60.0         
     frame = _select_sharpest_frame(stack)
     contrast = np.std(frame)
     params = dict(ADV_PARAMS)
@@ -1070,11 +916,9 @@ def auto_adjust_gam_params(path, logger=None):
 
 def _select_sharpest_frame(stack, logger=None):
     from skimage.filters import laplace
-    # On calcule la variance du laplacien (mesure de netteté) pour chaque frame
     sharpness = [np.var(laplace(f)) for f in stack]
     best_idx = int(np.argmax(sharpness))
     if logger: logger(f"Frame la plus nette: index {best_idx} (score={sharpness[best_idx]:.2e})")
-    # RETOURNE MAINTENANT UN TUPLE : (image, index)
     return stack[best_idx], best_idx
 
 def auto_adjust_gam_params(path, logger=None):
@@ -1083,7 +927,6 @@ def auto_adjust_gam_params(path, logger=None):
     if pixel_size is None: pixel_size = 0.1
     if dt is None: dt = 60.0
     
-    # Adaptation au nouveau retour (frame, idx)
     frame, _ = _select_sharpest_frame(stack)
     
     contrast = np.std(frame)
@@ -1097,13 +940,8 @@ def auto_adjust_gam_params(path, logger=None):
     return params
 
 def generate_overlay_preview(path, sigma, min_size, clahe_clip, deep_enhance, frame_index=None, logger=None):
-    """
-    Génère une preview. 
-    - Si frame_index est None : choisit automatiquement la plus nette.
-    - Retourne : (img_base64, nombre_total_frames, index_utilisé)
-    """
     import io, base64
-    from skimage import exposure, morphology # <--- AJOUT: morphology nécessaire pour le nettoyage
+    from skimage import exposure, morphology 
 
     if logger:
         logger(f"Preview IA sur: {os.path.basename(path)}")
@@ -1111,24 +949,18 @@ def generate_overlay_preview(path, sigma, min_size, clahe_clip, deep_enhance, fr
     stack = _load_stack(path, logger=logger)
     n_frames = len(stack)
     
-    # Choix de la frame
     if frame_index is not None:
-        # Mode Manuel
         idx = int(frame_index)
-        # Sécurité bornes
         idx = max(0, min(idx, n_frames - 1))
         frame = stack[idx]
         selected_idx = idx
         if logger: logger(f"Frame manuelle : {idx+1}/{n_frames}")
     else:
-        # Mode Auto (Sharpest)
         frame, selected_idx = _select_sharpest_frame(stack, logger=logger)
 
-    # Correction : remettre l'image en 0-255 pour Cellpose
     img = exposure.rescale_intensity(frame, in_range="image", out_range=(0, 1))
     img = img.astype(np.float32)
 
-    # INITIALISATION CELLPOSE POUR LA PREVIEW
     global GLOBAL_MODEL
     use_gpu = torch.cuda.is_available() if TORCH_OK else False
 
@@ -1139,24 +971,17 @@ def generate_overlay_preview(path, sigma, min_size, clahe_clip, deep_enhance, fr
         except Exception as e:
             if logger: logger(f"[ERREUR] Échec initialisation Cellpose preview : {e}")
 
-    # --- Segmentation ---
     mask = None
     if CELLPOSE_OK:
         try:
-            # 1. Prédiction brute
             mask = _segment_frame_cellpose(img, logger=logger)
-            
-            # 2. --- CORRECTION : NETTOYAGE IMMÉDIAT ---
             if mask is not None and min_size > 1:
-                # On applique le filtre de taille tout de suite
-                # remove_small_objects fonctionne sur les matrices de labels (int) ou bool
                 mask = morphology.remove_small_objects(mask, min_size=min_size).astype(np.int32)
                 if logger: logger(f"Filtre taille appliqué (Preview): min {min_size} px")
 
         except Exception as e:
             if logger: logger(f"Cellpose a échoué ({e}) — fallback GAM++.")
 
-    # --- Fallback GAM++ ---
     if mask is None or np.max(mask) == 0:
         mask = _segment_frame_gam(
             img,
@@ -1169,7 +994,6 @@ def generate_overlay_preview(path, sigma, min_size, clahe_clip, deep_enhance, fr
         )
         if logger: logger("↩️ Fallback GAM++ effectué.")
 
-    # --- Rendu Visuel ---
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.imshow(img, cmap="gray")
     if mask is not None and np.max(mask) > 0:
@@ -1182,22 +1006,15 @@ def generate_overlay_preview(path, sigma, min_size, clahe_clip, deep_enhance, fr
     plt.close(fig)
     img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
 
-    # On retourne l'image ET les infos de navigation (Total frames, Index actuel)
     return img_b64, n_frames, selected_idx
 
 def recalculate_with_new_masks(path, new_masks, logger=None):
-    """
-    Recalcule tout (Tracking, Motion, Metrics) à partir de masques corrigés manuellement.
-    Ne refait PAS la segmentation (rapide).
-    """
     if logger: logger(f"🔄 Recalcul des métriques pour {os.path.basename(path)}...")
 
-    # 1. Relire métadonnées
     pixel_size, dt = _read_metadata(path, logger=logger)
     if pixel_size is None: pixel_size = 0.1
     if dt is None: dt = 60.0
 
-    # 2. Refaire le Tracking (c'est là que les corrections impactent le lignage)
     tracks = _track_labels(new_masks, max_dist=20.0, logger=logger)
 
     if tracks is None or len(tracks) == 0:
@@ -1205,10 +1022,8 @@ def recalculate_with_new_masks(path, new_masks, logger=None):
         metrics = pd.DataFrame({"file": [os.path.basename(path)]})
         return metrics, pd.DataFrame()
 
-    # 3. Recalculer Vitesse et Morpho
     tracks = compute_motion_features(tracks, pixel_size, dt)
 
-    # 4. Recalculer Métriques Globales (Survie, Prolif)
     metrics = _metrics_from_tracks(tracks)
     metrics["file"] = os.path.basename(path)
 
@@ -1216,60 +1031,39 @@ def recalculate_with_new_masks(path, new_masks, logger=None):
     return metrics, tracks
 
 def detect_mitosis_events(tracks, max_dist=35.0, relative_area_tol=0.5):
-    """
-    Détecte les événements de division (Mitose).
-    Critères :
-    - Une cellule Mère (M) disparaît à t.
-    - Deux cellules Filles (F1, F2) apparaissent à t+1.
-    - Distance(M, F1) < max_dist ET Distance(M, F2) < max_dist.
-    - Conservation de masse : Aire(M) ≈ Aire(F1) + Aire(F2) (à +/- tolérance).
-    
-    Retourne : DataFrame avec colonnes [t, mother_id, d1_id, d2_id, x_m, y_m]
-    """
     events = []
     
     if tracks is None or tracks.empty:
         return pd.DataFrame()
 
-    # Pré-calcul : pour chaque track, trouver son t_min (naissance) et t_max (mort)
     track_stats = tracks.groupby("track_id")["t"].agg(["min", "max"])
     
-    # On parcourt le temps
     t_max_movie = tracks["t"].max()
     
     for t in range(tracks["t"].min(), t_max_movie):
-        # 1. Candidats Mères : tracks qui finissent exactement à t
         dying_ids = track_stats[track_stats["max"] == t].index
         if len(dying_ids) == 0: continue
         
-        # 2. Candidats Filles : tracks qui commencent exactement à t+1
         born_ids = track_stats[track_stats["min"] == (t + 1)].index
-        if len(born_ids) < 2: continue # Pas assez de naissances pour une division
+        if len(born_ids) < 2: continue 
         
-        # Récupérer les données spatiales et aires
         mothers = tracks[(tracks["t"] == t) & (tracks["track_id"].isin(dying_ids))]
         daughters = tracks[(tracks["t"] == t + 1) & (tracks["track_id"].isin(born_ids))]
         
         if mothers.empty or daughters.empty: continue
         
-        # Matrice de distance Mère vs Filles
         coords_m = mothers[["x", "y"]].values
         coords_d = daughters[["x", "y"]].values
         
-        # On cherche les paires proches
         from scipy.spatial.distance import cdist
         dists = cdist(coords_m, coords_d)
-        
-        # Pour chaque mère, on cherche 2 filles
+
         for i, m_id in enumerate(mothers["track_id"]):
-            # Indices des filles proches (< max_dist)
             close_indices = np.where(dists[i] < max_dist)[0]
             
             if len(close_indices) >= 2:
-                # On a des candidats ! Vérifions l'aire
                 area_m = mothers.iloc[i]["area"]
                 
-                # On teste toutes les paires possibles parmi les voisines
                 from itertools import combinations
                 for idx1, idx2 in combinations(close_indices, 2):
                     d1 = daughters.iloc[idx1]
@@ -1277,9 +1071,7 @@ def detect_mitosis_events(tracks, max_dist=35.0, relative_area_tol=0.5):
                     
                     area_sum = d1["area"] + d2["area"]
                     
-                    # Vérification tolérance aire (ex: la somme doit être entre 50% et 150% de la mère)
                     if (1.0 - relative_area_tol) * area_m < area_sum < (1.0 + relative_area_tol) * area_m:
-                        # MITOSE TROUVÉE !
                         events.append({
                             "t": t,
                             "mother_id": m_id,
@@ -1288,6 +1080,6 @@ def detect_mitosis_events(tracks, max_dist=35.0, relative_area_tol=0.5):
                             "x": mothers.iloc[i]["x"],
                             "y": mothers.iloc[i]["y"]
                         })
-                        break # On a trouvé les filles pour cette mère, on passe à la suivante
+                        break 
 
     return pd.DataFrame(events)
