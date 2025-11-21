@@ -662,9 +662,10 @@ def main(page: ft.Page):
         page.update()
 
 
-    def save_csv_callback(e, df):
-        if e.path and df is not None:
+    def save_csv_callback(e: ft.FilePickerResultEvent):
+        if e.path and e.control.data is not None:
              try:
+                df = e.control.data
                 df.to_csv(e.path, index=False)
                 log(f"[EXPORT] CSV sauvegardé : {e.path}")
                 page.snack_bar = ft.SnackBar(ft.Text(f"Sauvegardé : {e.path}"))
@@ -672,6 +673,8 @@ def main(page: ft.Page):
                 page.update()
              except Exception as ex:
                 log(f"[ERREUR] Export CSV : {ex}")
+
+    save_file_picker.on_result = save_csv_callback
 
     def video_save_callback(e: ft.FilePickerResultEvent):
         if e.path and e.control.data:
