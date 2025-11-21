@@ -154,7 +154,7 @@ def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=Fa
             deep_enhance=ADV_PARAMS["deep_enhance"],
         )
 
-        tracks = _track_labels(labels_list, max_dist=100.0, logger=logger)
+        tracks = _track_labels(labels_list, max_dist=45.0, logger=logger)
 
         if tracks is None or len(tracks) == 0:
             if logger:

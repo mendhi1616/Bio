@@ -916,14 +916,29 @@ def main(page: ft.Page):
                 page.update()
 
             def export_current_csv(e):
-                save_file_picker.data = df 
+                clean_columns = [
+                    "track_id", "t", "x", "y",
+                    "speed_um_s", "cum_distance_um",
+                    "area_um2", "circularity", "eccentricity",
+                    "aspect_ratio", "solidity", "feret_max_um", 
+                    "angle_deg", "straightness"
+                ]
+                
+                valid_cols = [c for c in clean_columns if c in df.columns]
+                df_clean = df[valid_cols].copy()
+                
+                df_clean = df_clean.round(3)
+                
+                if "track_id" in df_clean.columns and "t" in df_clean.columns:
+                    df_clean = df_clean.sort_values(["track_id", "t"])
+
+                save_file_picker.data = df_clean 
+                
                 save_file_picker.save_file(
                     dialog_title=f"Sauvegarder {file_key}.csv",
-                    file_name=f"{file_key}_tracking.csv",
+                    file_name=f"{file_key}_tracking_clean.csv",
                     allowed_extensions=["csv"]
                 )
-
-            save_file_picker.on_result = lambda e: save_csv_callback(e, df)
 
             def export_video_click(e):
                 video_save_picker.data = {
@@ -1022,19 +1037,51 @@ def main(page: ft.Page):
                 import traceback
                 log(traceback.format_exc())
 
+
+        # --- COMPARAISON (Version Corrigée avec Sauvegarde) ---
         def show_comparison(e):
             try:
                 files = list(GLOBAL_RESULTS.keys())
-                
                 if len(files) < 2:
                     page.snack_bar = ft.SnackBar(ft.Text("Il faut analyser au moins 2 fichiers pour comparer."))
                     page.snack_bar.open = True
                     page.update()
                     return
 
-                dd1 = ft.Dropdown(options=[ft.dropdown.Option(f) for f in files], value=files[0], label="Fichier A", expand=True)
-                dd2 = ft.Dropdown(options=[ft.dropdown.Option(f) for f in files], value=files[1] if len(files)>1 else files[0], label="Fichier B", expand=True)
-                result_area = ft.Column()
+                dd1 = ft.Dropdown(options=[ft.dropdown.Option(f) for f in files], value=files[0], label="Condition A", expand=True)
+                dd2 = ft.Dropdown(options=[ft.dropdown.Option(f) for f in files], value=files[1] if len(files)>1 else files[0], label="Condition B", expand=True)
+                
+                result_area = ft.Column(scroll=ft.ScrollMode.AUTO, height=350)
+                
+                # Variable pour garder le texte en mémoire
+                report_data = {"text": ""}
+
+                def save_report_click(e):
+                    if not report_data["text"]:
+                        page.snack_bar = ft.SnackBar(ft.Text("Rien à sauvegarder. Lancez la comparaison d'abord."))
+                        page.snack_bar.open = True
+                        page.update()
+                        return
+                    
+                    import time
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    # On utilise le dossier de sortie actuel
+                    out = CURRENT_OUTPUT_DIR if 'CURRENT_OUTPUT_DIR' in locals() else "outputs"
+                    os.makedirs(out, exist_ok=True)
+                    
+                    filename = f"rapport_comparaison_{timestamp}.md"
+                    path = os.path.join(out, filename)
+                    
+                    try:
+                        with open(path, "w", encoding="utf-8") as f:
+                            f.write(report_data["text"])
+                        
+                        page.snack_bar = ft.SnackBar(ft.Text(f"Rapport sauvegardé : {filename}"))
+                        page.snack_bar.open = True
+                        page.update()
+                        log(f"💾 Rapport sauvegardé : {path}")
+                    except Exception as ex:
+                        log(f"Erreur sauvegarde : {ex}")
 
                 def compute_comp(e):
                     try:
@@ -1049,44 +1096,64 @@ def main(page: ft.Page):
                         df1 = res1.get("tracks")
                         df2 = res2.get("tracks")
 
-                        if df1 is None or df1.empty:
-                            result_area.controls = [ft.Text(f"Pas de tracking pour {f1}", color="red")]
-                            result_area.update()
-                            return
-                        
-                        if df2 is None or df2.empty:
-                            result_area.controls = [ft.Text(f"Pas de tracking pour {f2}", color="red")]
+                        if df1 is None or df1.empty or df2 is None or df2.empty:
+                            result_area.controls = [ft.Text("Données manquantes (tracking vide).", color="red")]
                             result_area.update()
                             return
 
+                        # Helper moyenne
+                        def get_mean(df, col):
+                            return df[col].mean() if col in df.columns else 0.0
+
+                        # Stats Mouvement
                         col_s = "speed_um_s" if "speed_um_s" in df1.columns else "speed"
-                        s1 = df1[col_s].mean() if col_s in df1.columns else 0
-                        s2 = df2[col_s].mean() if col_s in df2.columns else 0
+                        s1, s2 = get_mean(df1, col_s), get_mean(df2, col_s)
                         
-                        c1 = df1["track_id"].nunique()
-                        c2 = df2["track_id"].nunique()
+                        col_d = "cum_distance_um" if "cum_distance_um" in df1.columns else "cum_distance"
+                        d1 = df1[col_d].max() if col_d in df1.columns else 0
+                        d2 = df2[col_d].max() if col_d in df2.columns else 0
+
+                        # Stats Morpho
+                        area1, area2 = get_mean(df1, "area_um2"), get_mean(df2, "area_um2")
+                        circ1, circ2 = get_mean(df1, "circularity"), get_mean(df2, "circularity")
+                        ar1, ar2 = get_mean(df1, "aspect_ratio"), get_mean(df2, "aspect_ratio")
 
                         txt = (
-                            f"### Comparaison\n\n"
-                            f"**{f1}** : {c1} cellules, Vitesse {s1:.3f} µm/s\n"
-                            f"**{f2}** : {c2} cellules, Vitesse {s2:.3f} µm/s\n\n"
-                            f"**Delta (A-B)** : Vitesse {s1-s2:.3f}, Cellules {c1-c2}"
+                            f"### 🔬 Comparaison : {f1} vs {f2}\n\n"
+                            f"#### 🚀 Dynamique\n"
+                            f"| Métrique | {f1} | {f2} | Delta |\n"
+                            f"| :--- | :--- | :--- | :--- |\n"
+                            f"| **Vitesse** (µm/s) | `{s1:.3f}` | `{s2:.3f}` | `{s1-s2:+.3f}` |\n"
+                            f"| **Dist. Max** (µm) | `{d1:.1f}` | `{d2:.1f}` | `{d1-d2:+.1f}` |\n\n"
+                            
+                            f"#### 🧬 Morphologie\n"
+                            f"| Métrique | {f1} | {f2} | Delta |\n"
+                            f"| :--- | :--- | :--- | :--- |\n"
+                            f"| **Aire** (µm²) | `{area1:.1f}` | `{area2:.1f}` | `{area1-area2:+.1f}` |\n"
+                            f"| **Circularité** | `{circ1:.3f}` | `{circ2:.3f}` | `{circ1-circ2:+.3f}` |\n"
+                            f"| **Allongement** | `{ar1:.2f}` | `{ar2:.2f}` | `{ar1-ar2:+.2f}` |"
                         )
-                        result_area.controls = [ft.Markdown(txt)]
+                        
+                        report_data["text"] = txt
+                        result_area.controls = [ft.Markdown(txt, selectable=True)]
                         result_area.update()
+
                     except Exception as ex_comp:
                          result_area.controls = [ft.Text(f"Erreur calcul : {ex_comp}", color="red")]
                          result_area.update()
 
                 dlg = ft.AlertDialog(
-                    title=ft.Text("⚖️ Comparer deux résultats"),
+                    title=ft.Text("⚖️ Comparateur"),
                     content=ft.Container(
                         content=ft.Column([
                             ft.Row([dd1, dd2]),
-                            ft.ElevatedButton("Lancer la comparaison", on_click=compute_comp),
+                            ft.Row([
+                                ft.ElevatedButton("Lancer", on_click=compute_comp),
+                                ft.ElevatedButton("💾 Sauvegarder", on_click=save_report_click, bgcolor="blue700", color="white"),
+                            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                             ft.Divider(),
                             result_area
-                        ], height=400, width=600),
+                        ], height=500, width=700),
                         padding=10
                     ),
                     actions=[ft.TextButton("Fermer", on_click=lambda _: page.close_dialog())]
@@ -1099,7 +1166,6 @@ def main(page: ft.Page):
                 log(f"[CRASH] Comparaison : {ex}")
                 import traceback
                 log(traceback.format_exc())
-
 
         def open_napari_viewer(e):
             import numpy as np
