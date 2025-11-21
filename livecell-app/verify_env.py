@@ -75,6 +75,8 @@ REQUIRED = {
     "h5py": ">=3.11.0",
     "imageio": ">=2.34.0",
     "typing-extensions": ">=4.8.0",
+    "plotly": ">=5.0.0",
+    "napari": ">=0.5.0",
 }
 
 
