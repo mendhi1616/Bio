@@ -28,8 +28,8 @@ except Exception:
     CELLPOSE_OK = False
 ADV_PARAMS = {
     "sigma": 1.2,
-    "min_size": 20,
-    "max_size": 6000,
+    "min_size": 600,
+    "max_size": 10000,
     "clahe_clip": 0.03,
     "edge_margin": 30,
     "deep_enhance": False,
@@ -173,7 +173,7 @@ def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=Fa
         )
 
         # --- Tracking ---
-        tracks = _track_labels(labels_list, max_dist=20.0, logger=logger)
+        tracks = _track_labels(labels_list, max_dist=100.0, logger=logger)
 
         if tracks is None or len(tracks) == 0:
             if logger:
@@ -424,6 +424,9 @@ def _segment_frame_gam(img, sigma=1.6, min_size=1200, max_size=120000,
 def _segment_stack(stack, method="gam", logger=None, **kwargs):
     import cv2
     import logging
+    from skimage import morphology 
+    import numpy as np
+    
     # On fait taire les warnings de Cellpose
     logging.getLogger("cellpose").setLevel(logging.ERROR)
 
@@ -436,7 +439,7 @@ def _segment_stack(stack, method="gam", logger=None, **kwargs):
         method = "cellpose" if CELLPOSE_OK else "gam"
 
     # =========================================================
-    # MODE CELLPOSE (Optimisé : 75% de la taille)
+    # MODE CELLPOSE (Optimisé : 75% de la taille + FILTRE)
     # =========================================================
     if method == "cellpose" and CELLPOSE_OK:
         global GLOBAL_MODEL
@@ -450,15 +453,11 @@ def _segment_stack(stack, method="gam", logger=None, **kwargs):
             h, w = stack.shape[-2:]
             
             # --- REGLAGE DU SCALE ---
-            # Si l'image est grande (>800px), on la réduit à 75% (0.75)
-            # Sinon on garde 100% (1.0) pour ne pas perdre de détails sur les petites images
             scale = 0.75 if (h > 800 or w > 800) else 1.0
-            
-            # On adapte le diamètre moyen (30px par défaut) à cette réduction
             diam = 30.0 * scale
 
             if logger and scale != 1.0: 
-                logger(f"    ⚡ Turbo activé: Analyse à {int(scale*100)}% de la taille")
+                logger(f"Turbo activé: Analyse à {int(scale*100)}% de la taille")
 
             # 1. PREPARATION RAPIDE
             inputs = [
@@ -485,7 +484,6 @@ def _segment_stack(stack, method="gam", logger=None, **kwargs):
                     do_3D=False
                 )
                 
-                # Extraction propre
                 masks = res[0] if isinstance(res, tuple) else res
                 masks = masks if isinstance(masks, list) else [masks[k] for k in range(masks.shape[0])]
 
@@ -499,17 +497,30 @@ def _segment_stack(stack, method="gam", logger=None, **kwargs):
                 else:
                     labels_list.extend(masks)
                 
-                if use_gpu: torch.cuda.empty_cache()
+                if use_gpu and TORCH_OK:
+                    torch.cuda.empty_cache()
 
-            if logger: logger(f"    • Terminé : {len(labels_list)} frames.")
-            return labels_list
+            if logger: logger(f"    • Cellpose terminé : {len(labels_list)} frames.")
 
         except Exception as e:
-            if logger: logger(f"[ERREUR] Batch échoué ({e}) -> Fallback.")
+            if logger: logger(f"[ERREUR] Batch échoué ({e}) -> Fallback frame-by-frame.")
+            # Fallback manuel
             labels_list = []
             for frame in stack:
                 labels_list.append(_segment_frame_cellpose(frame, logger=None))
-            return labels_list
+
+        # --- 4. NETTOYAGE DES DÉBRIS (Commun au mode Batch et Fallback) ---
+        min_sz = kwargs.get("min_size", ADV_PARAMS["min_size"])
+        
+        if min_sz > 1 and labels_list:
+            if logger: logger(f"    🧹 Nettoyage des débris < {min_sz} px")
+            # Optimisation : List Comprehension
+            labels_list = [
+                morphology.remove_small_objects(m, min_size=min_sz).astype(np.int32)
+                for m in labels_list
+            ]
+
+        return labels_list
 
     # =========================================================
     # MODE GAM++ (Classique)
@@ -609,7 +620,7 @@ def _track_labels(labels_list, max_dist=15.0, logger=None, gap_frames=2):
                 track_end[row["track_id"]] = (row["x"], row["y"], t)
             next_track_id += len(df)
             
-            # CORRECTION IMPORTANTE : On sauvegarde la frame 0 !
+            # SÉCURITÉ : On sauvegarde la frame 0 !
             if not df.empty:
                 tracks.append(df[cols_to_keep])
 
@@ -646,6 +657,7 @@ def _track_labels(labels_list, max_dist=15.0, logger=None, gap_frames=2):
                 next_track_id += 1
 
                 track_id.loc[obj] = new_tid
+                # On stocke (x, y, t, new_tid)
                 pending_start[obj] = (df.loc[obj, "x"], df.loc[obj, "y"], t, new_tid)
 
         df["track_id"] = track_id.values
@@ -661,42 +673,52 @@ def _track_labels(labels_list, max_dist=15.0, logger=None, gap_frames=2):
 
 
     # -----------------------
-    # PASS 2 : GAP CLOSING
+    # PASS 2 : GAP CLOSING INTELLIGENT
     # -----------------------
 
     if logger:
-        logger("  ↳ Gap closing…")
+        logger("  ↳ Gap closing (Reconnexion)...")
 
-    # On ne lance le gap closing que s'il y a des données en attente et des tracks
     if pending_start and tracks:
-        for obj, (x2, y2, t2, new_tid) in list(pending_start.items()):
-            # Try to reconnect to an older track
+        # On trie les objets orphelins par temps pour traiter dans l'ordre chrono
+        sorted_pending = sorted(pending_start.items(), key=lambda x: x[1][2]) # x[1][2] est le temps t
+        
+        for obj, (x2, y2, t2, new_tid) in sorted_pending:
             best_tid = None
             best_dist = 9999
 
             for tid, (x1, y1, t1) in track_end.items():
-                # On cherche dans le passé (t2 - t1 doit être <= gap_frames)
-                if 1 <= (t2 - t1) <= gap_frames:
+                delta_t = t2 - t1
+                
+                # On cherche dans le passé récent
+                if 1 <= delta_t <= gap_frames:
                     dist = np.hypot(x2 - x1, y2 - y1)
-                    if dist < max_dist and dist < best_dist:
+                    
+                    # --- AMÉLIORATION CLÉ : DISTANCE DYNAMIQUE ---
+                    # Si on a sauté 2 frames, on a le droit d'avoir bougé 2x plus loin
+                    dynamic_max_dist = max_dist * delta_t
+                    
+                    if dist < dynamic_max_dist and dist < best_dist:
                         best_tid = tid
                         best_dist = dist
 
-            # Reconnect : mise à jour rétroactive des IDs
+            # Reconnexion réussie
             if best_tid is not None:
+                # Mise à jour du point de fin de la piste
+                track_end[best_tid] = (x2, y2, t2)
+                
+                # Correction rétroactive de l'ID dans les données sauvegardées
                 for df_track in tracks:
                     mask = df_track["track_id"] == new_tid
                     if mask.any():
                         df_track.loc[mask, "track_id"] = best_tid
                 
                 if logger:
-                    logger(f"    ↳ Gap closing : track {new_tid} → {best_tid}")
+                    logger(f"    ↳ Reconnexion : ID temporaire {new_tid} -> ID {best_tid}")
 
     # -----------------------
     # Résultat final (SÉCURISÉ)
     # -----------------------
-    
-    # SÉCURITÉ CRITIQUE : Si tracks est vide, on renvoie un DF vide structuré
     if not tracks:
         if logger: logger("[WARN] Aucune cellule suivie détectée.")
         return pd.DataFrame(columns=cols_to_keep)
@@ -1046,24 +1068,68 @@ def auto_adjust_gam_params(path, logger=None):
         params["sigma"] = 1.6; params["clahe_clip"] = 0.025; params["min_size"] = 30
     return params
 
-def generate_overlay_preview(path, sigma, min_size, clahe_clip, deep_enhance, logger=None):
+def _select_sharpest_frame(stack, logger=None):
+    from skimage.filters import laplace
+    # On calcule la variance du laplacien (mesure de netteté) pour chaque frame
+    sharpness = [np.var(laplace(f)) for f in stack]
+    best_idx = int(np.argmax(sharpness))
+    if logger: logger(f"Frame la plus nette: index {best_idx} (score={sharpness[best_idx]:.2e})")
+    # RETOURNE MAINTENANT UN TUPLE : (image, index)
+    return stack[best_idx], best_idx
+
+def auto_adjust_gam_params(path, logger=None):
+    stack = _load_stack(path, logger=logger)
+    pixel_size, dt = _read_metadata(path, logger=logger)
+    if pixel_size is None: pixel_size = 0.1
+    if dt is None: dt = 60.0
+    
+    # Adaptation au nouveau retour (frame, idx)
+    frame, _ = _select_sharpest_frame(stack)
+    
+    contrast = np.std(frame)
+    params = dict(ADV_PARAMS)
+    if contrast < 0.07:
+        params["sigma"] = 1.0; params["clahe_clip"] = 0.06; params["min_size"] = 15
+    elif contrast < 0.12:
+        params["sigma"] = 1.3; params["clahe_clip"] = 0.04; params["min_size"] = 25
+    else:
+        params["sigma"] = 1.6; params["clahe_clip"] = 0.025; params["min_size"] = 30
+    return params
+
+def generate_overlay_preview(path, sigma, min_size, clahe_clip, deep_enhance, frame_index=None, logger=None):
+    """
+    Génère une preview. 
+    - Si frame_index est None : choisit automatiquement la plus nette.
+    - Retourne : (img_base64, nombre_total_frames, index_utilisé)
+    """
     import io, base64
-    from skimage import exposure
+    from skimage import exposure, morphology # <--- AJOUT: morphology nécessaire pour le nettoyage
 
     if logger:
         logger(f"Preview IA sur: {os.path.basename(path)}")
 
     stack = _load_stack(path, logger=logger)
-    frame = _select_sharpest_frame(stack, logger=logger)
+    n_frames = len(stack)
+    
+    # Choix de la frame
+    if frame_index is not None:
+        # Mode Manuel
+        idx = int(frame_index)
+        # Sécurité bornes
+        idx = max(0, min(idx, n_frames - 1))
+        frame = stack[idx]
+        selected_idx = idx
+        if logger: logger(f"Frame manuelle : {idx+1}/{n_frames}")
+    else:
+        # Mode Auto (Sharpest)
+        frame, selected_idx = _select_sharpest_frame(stack, logger=logger)
 
-    # 🔥 Correction : remettre l'image en 0-255 pour Cellpose
+    # Correction : remettre l'image en 0-255 pour Cellpose
     img = exposure.rescale_intensity(frame, in_range="image", out_range=(0, 1))
     img = img.astype(np.float32)
 
     # INITIALISATION CELLPOSE POUR LA PREVIEW
     global GLOBAL_MODEL
-
-    # --- GPU ---
     use_gpu = torch.cuda.is_available() if TORCH_OK else False
 
     if GLOBAL_MODEL is None and CELLPOSE_OK:
@@ -1073,13 +1139,20 @@ def generate_overlay_preview(path, sigma, min_size, clahe_clip, deep_enhance, lo
         except Exception as e:
             if logger: logger(f"[ERREUR] Échec initialisation Cellpose preview : {e}")
 
-
-    # --- Cellpose ---
+    # --- Segmentation ---
     mask = None
     if CELLPOSE_OK:
-        if logger: logger("Tentative de segmentation via Cellpose…")
         try:
+            # 1. Prédiction brute
             mask = _segment_frame_cellpose(img, logger=logger)
+            
+            # 2. --- CORRECTION : NETTOYAGE IMMÉDIAT ---
+            if mask is not None and min_size > 1:
+                # On applique le filtre de taille tout de suite
+                # remove_small_objects fonctionne sur les matrices de labels (int) ou bool
+                mask = morphology.remove_small_objects(mask, min_size=min_size).astype(np.int32)
+                if logger: logger(f"Filtre taille appliqué (Preview): min {min_size} px")
+
         except Exception as e:
             if logger: logger(f"Cellpose a échoué ({e}) — fallback GAM++.")
 
@@ -1096,15 +1169,11 @@ def generate_overlay_preview(path, sigma, min_size, clahe_clip, deep_enhance, lo
         )
         if logger: logger("↩️ Fallback GAM++ effectué.")
 
-    # --- Contours ---
+    # --- Rendu Visuel ---
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.imshow(img, cmap="gray")
     if mask is not None and np.max(mask) > 0:
         ax.contour(mask, colors="lime", linewidths=0.8)
-        if logger: logger(f"Preview : {int(mask.max())} objets détectés.")
-    else:
-        if logger: logger("Aucun objet détecté pour la preview.")
-
     ax.axis("off")
     fig.tight_layout(pad=0)
 
@@ -1113,8 +1182,8 @@ def generate_overlay_preview(path, sigma, min_size, clahe_clip, deep_enhance, lo
     plt.close(fig)
     img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
 
-    if logger: logger("Preview encodée (base64) prête pour affichage Flet.")
-    return img_b64
+    # On retourne l'image ET les infos de navigation (Total frames, Index actuel)
+    return img_b64, n_frames, selected_idx
 
 def recalculate_with_new_masks(path, new_masks, logger=None):
     """

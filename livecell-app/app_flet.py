@@ -213,7 +213,8 @@ class TrackViewer(ft.Container):
         super().__init__(
             bgcolor="black",
             padding=10,
-            expand=True
+            expand=True, # Prend tout l'écran (Overlay)
+            alignment=ft.alignment.center
         )
 
         self.stack = stack
@@ -222,41 +223,58 @@ class TrackViewer(ft.Container):
         self.t = 0
         self.playing = False
         
-        self.img_display = ft.Image(border_radius=5)
+        # --- IMAGE ADAPTATIVE ---
+        # expand=True : Prend tout l'espace vertical disponible
+        # fit=CONTAIN : Redimensionne l'image pour qu'elle tienne ENTIÈREMENT dans l'espace
+        self.img_display = ft.Image(
+            border_radius=5,
+            fit=ft.ImageFit.CONTAIN,
+            expand=True
+        )
         
         self.slider = ft.Slider(
             min=0,
             max=len(stack) - 1,
             value=0,
-            on_change=self.on_seek
+            on_change=self.on_seek,
+            expand=True # Le slider prend toute la largeur dispo
         )
 
-        # ---- Boutons universels (pas d'icons) ----
-        self.play_btn = ft.TextButton(
-            "▶",
+        self.play_btn = ft.IconButton(
+            icon=ft.Icons.PLAY_ARROW,  # <--- CORRECTION ICI (Majuscule)
             on_click=self.toggle_play,
-            style=ft.ButtonStyle(color="white")
+            icon_color="white",
+            tooltip="Lecture/Pause"
         )
 
-        self.close_btn = ft.TextButton(
-            "✖",
+        self.close_btn = ft.IconButton(
+            icon=ft.Icons.CLOSE,       # <--- CORRECTION ICI (Majuscule)
             on_click=self.close,
-            style=ft.ButtonStyle(color="red400")
+            icon_color="red400",
+            tooltip="Fermer"
         )
 
+        # Disposition : Contrôles en haut, Image en dessous (qui prend tout le reste)
         self.content = ft.Column(
             [
-                ft.Row([self.play_btn, self.slider, self.close_btn]),
+                ft.Row(
+                    [self.play_btn, self.slider, self.close_btn], 
+                    alignment=ft.MainAxisAlignment.CENTER
+                ),
                 self.img_display,
             ],
-            expand=True
+            expand=True,
+            alignment=ft.MainAxisAlignment.START,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER
         )
 
         self.update_frame()
 
     # ---------------- FRAME UPDATE ----------------
     def update_frame(self):
-        # Use shared function for rendering
+        # Appel à la fonction globale de dessin
+        # On passe None pour mitoses car TrackViewer ne gère pas encore l'affichage des divisions
+        # Si vous voulez afficher les mitoses, il faudra passer 'mitoses' au constructeur
         img_annotated = draw_annotated_frame(self.stack[self.t], self.t, self.df, self.masks)
         
         import cv2
@@ -264,7 +282,6 @@ class TrackViewer(ft.Container):
         img_base64 = base64.b64encode(buf).decode()
 
         self.img_display.src_base64 = img_base64
-        # Only call update() if control is on page
         if self.page:
             self.update()
 
@@ -274,7 +291,8 @@ class TrackViewer(ft.Container):
 
     def toggle_play(self, e):
         self.playing = not self.playing
-        self.play_btn.text = "⏸" if self.playing else "▶"
+        # <--- CORRECTION ICI (Majuscule pour Icons)
+        self.play_btn.icon = ft.Icons.PAUSE if self.playing else ft.Icons.PLAY_ARROW
         self.update()
         if self.playing:
             threading.Thread(target=self.autoplay_loop, daemon=True).start()
@@ -283,14 +301,18 @@ class TrackViewer(ft.Container):
         import time
         while self.playing:
             self.t = (self.t + 1) % len(self.stack)
+            # Mise à jour thread-safe du slider
             self.slider.value = self.t
             self.update_frame()
-            time.sleep(0.05)
+            time.sleep(0.1) # Vitesse de lecture
 
     def close(self, e):
+        self.playing = False
         self.visible = False
         self.update()
-
+        # On retire l'overlay pour nettoyer
+        self.page.overlay.remove(self)
+        self.page.update()
 
 
 def main(page: ft.Page):
@@ -449,12 +471,19 @@ def main(page: ft.Page):
         ),
     )
 
+# Variable d'état pour savoir si on vient de charger un nouveau fichier
+    file_just_loaded = False
+
     def on_file_picked(e: ft.FilePickerResultEvent):
-        nonlocal preview_file_path
+        nonlocal preview_file_path, file_just_loaded
         log_view.controls.clear()
         if e.files:
             preview_file_path = e.files[0].path or e.files[0].name
             picked_path_text.value = f"Fichier sélectionné : {os.path.basename(preview_file_path)}"
+            
+            # On marque qu'on vient de charger un fichier -> Mode "Auto" pour la première frame
+            file_just_loaded = True
+            
             page.update()
             update_preview_final()
         else:
@@ -462,97 +491,93 @@ def main(page: ft.Page):
             picked_path_text.value = "Aucun fichier chargé."
             preview_img.src = None
             preview_img.src_base64 = None
+            
+            # On désactive le slider si aucun fichier
+            frame_slider.disabled = True
+            frame_slider.label = "Frame"
             page.update()
 
     fp.on_result = on_file_picked
 
     _preview_timer = None
     def debounce_preview():
-        global _preview_timer
+        nonlocal _preview_timer
+        # On vérifie si l'aperçu auto est activé (auto_preview_switch ou auto_preview_check selon votre code)
+        # Ici on utilise auto_preview_check comme dans votre snippet
         if not auto_preview_check.value:
             return
-        if _preview_timer and _preview_timer.is_alive():
-            _preview_timer.cancel()
+            
+        try:
+            if _preview_timer and _preview_timer.is_alive():
+                _preview_timer.cancel()
+        except Exception: pass
+        
         _preview_timer = threading.Timer(0.6, update_preview_final)
         _preview_timer.start()
 
     def update_preview_final():
+        nonlocal file_just_loaded
         if not preview_file_path or not os.path.exists(preview_file_path):
             return
 
         try:
             log_view.controls.clear()
-            log(f"Nouvelle preview — σ={sigma_slider.value:.2f}, min={min_size_slider.value:.0f}, CLAHE={clahe_slider.value:.3f}")
             spinner.visible = True
             page.update()
 
-            img_b64 = generate_overlay_preview(
+            # --- LOGIQUE DE NAVIGATION FRAME ---
+            # Si on vient de charger le fichier -> req_frame = None (Laisse pipeline choisir la plus nette)
+            # Sinon -> On prend la valeur actuelle du slider
+            req_frame = None
+            if not file_just_loaded:
+                req_frame = int(frame_slider.value)
+
+            # Appel à generate_overlay_preview (Note: renvoie maintenant 3 valeurs)
+            img_b64, n_total, used_idx = generate_overlay_preview(
                 preview_file_path,
                 sigma=float(sigma_slider.value),
                 min_size=int(min_size_slider.value),
                 clahe_clip=float(clahe_slider.value),
-                logger=log,
                 deep_enhance=bool(deep_check.value),
+                frame_index=req_frame,  # <--- Nouvel argument
+                logger=log,
             )
 
             if img_b64:
                 preview_img.src_base64 = img_b64
                 preview_img.src = None 
+                
+                # --- MISE À JOUR DU SLIDER ---
+                if n_total > 1:
+                    frame_slider.min = 0
+                    frame_slider.max = n_total - 1
+                    frame_slider.divisions = max(1, n_total - 1)
+                    frame_slider.value = used_idx
+                    frame_slider.label = f"Frame {used_idx+1} / {n_total}"
+                    frame_slider.disabled = False
+                else:
+                    # Image unique
+                    frame_slider.min = 0
+                    frame_slider.max = 0
+                    frame_slider.value = 0
+                    frame_slider.label = "1/1"
+                    frame_slider.disabled = True
+
+                # On a fini l'initialisation, les prochains appels suivront le slider
+                file_just_loaded = False
+
                 preview_img.update()
-                log("Preview IA mise à jour.")
+                frame_slider.update()
+                
+                log(f"Preview générée (Frame {used_idx+1}/{n_total})")
+                log(f"Params: σ={sigma_slider.value:.2f}, min={min_size_slider.value:.0f}, CLAHE={clahe_slider.value:.3f}")
             else:
                 log("Aucune image générée.")
+
         except Exception as ex:
             log(f"Erreur de preview: {ex}")
-        finally:
-            spinner.visible = False
-            page.update()
-
-    deep_check = ft.Switch(
-        label="Amélioration profonde (Deep Enhance)",
-        value=False,
-        on_change=lambda e: debounce_preview()
-    )
-
-    import threading
-    _preview_timer = None
-
-    def debounce_preview():
-        nonlocal _preview_timer
-        try:
-            if _preview_timer and _preview_timer.is_alive():
-                _preview_timer.cancel()
-        except Exception:
-            pass
-        _preview_timer = threading.Timer(0.8, update_preview_final)
-        _preview_timer.start()
-
-    def update_preview_final():
-        if not preview_file_path or not os.path.exists(preview_file_path):
-            return
-        try:
-            spinner.visible = True
-            log_view.controls.clear()
-            log(f"Nouvelle preview — σ={sigma_slider.value:.2f}, min={min_size_slider.value:.0f}, CLAHE={clahe_slider.value:.3f}")
-            page.update()
-
-            img_b64 = generate_overlay_preview(
-                preview_file_path,
-                sigma=float(sigma_slider.value),
-                min_size=int(min_size_slider.value),
-                clahe_clip=float(clahe_slider.value),
-                logger=log,
-                deep_enhance=bool(deep_check.value),
-            )
-
-            if img_b64:
-                preview_img.src_base64 = img_b64
-                preview_img.update()
-                log("Preview mise à jour.")
-            else:
-                log("Aucune image générée.")
-        except Exception as ex:
-            log(f"Erreur de preview : {ex}")
+            import traceback
+            log(traceback.format_exc())
         finally:
             spinner.visible = False
             page.update()
@@ -581,9 +606,19 @@ def main(page: ft.Page):
         expand=True,
     )
 
+    frame_slider = ft.Slider(
+        min=0, max=1, value=0, divisions=1,
+        label="Frame {value}",
+        on_change=lambda e: debounce_preview(), # Met à jour la preview quand on bouge
+        disabled=True # Désactivé tant qu'il n'y a pas de fichier
+    )
+    frame_text = ft.Text("Navigation Frame", width=180)
+
     min_text = ft.Text("Taille minimale (px)", width=180)
     min_size_slider = ft.Slider(
-        min=5, max=500, divisions=99,
+        min=5, 
+        max=2000,       # <--- MODIFICATION ICI (C'était 500, mettez 2000)
+        divisions=200,  # Augmentez aussi un peu les divisions pour la fluidité
         value=float(ADV_PARAMS["min_size"]),
         label=f"{ADV_PARAMS['min_size']:.0f}",
         on_change=on_slider_change,
@@ -613,6 +648,8 @@ def main(page: ft.Page):
                     ft.Row([sigma_text, sigma_slider], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                     ft.Row([min_text, min_size_slider], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                     ft.Row([clahe_text, clahe_slider], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                    ft.Divider(),
+                    ft.Row([frame_text, frame_slider], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                     ft.Divider(),
                     deep_check,
                     auto_preview_switch,
@@ -786,11 +823,13 @@ def main(page: ft.Page):
 
                 try:
                     fname = os.path.basename(pth)
+                    
+                    # 1. Analyse (avec le nouveau filtre intégré dans process_file)
                     metrics, tracks, current_stack, current_masks, mitoses = process_file(
                         pth, seg_method=method, logger=log, debug=False, fast_mode=use_fast
                     )
 
-                    # Store in global cache
+                    # 2. Stockage Mémoire
                     GLOBAL_RESULTS[fname] = {
                         "tracks": tracks,
                         "stack": current_stack,
@@ -800,14 +839,33 @@ def main(page: ft.Page):
                         "condition": cond
                     }
 
-                    # Append metrcis for plotting
+                    # 3. Auto-Save
+                    img_dir = os.path.dirname(pth)
+                    save_dir = os.path.join(img_dir, "results_auto")
+                    os.makedirs(save_dir, exist_ok=True)
+                    
+                    base_name = os.path.splitext(fname)[0]
+                    if tracks is not None and not tracks.empty:
+                        tracks.to_csv(os.path.join(save_dir, f"{base_name}_tracks.csv"), index=False)
+                    
+                    metrics.to_csv(os.path.join(save_dir, f"{base_name}_metrics.csv"), index=False)
+
+                    # 4. Append metrics for global plotting
                     metrics["condition"] = cond
                     all_results_meta.append(metrics)
 
-                    log(f"OK: {fname}")
+                    # --- 5. AFFICHAGE DU NOMBRE RÉEL DE CELLULES ---
+                    # On compte les ID uniques dans le tracking, pas la somme des frames
+                    if tracks is not None and not tracks.empty:
+                        n_unique = tracks["track_id"].nunique()
+                        log(f"✅ {fname} : {n_unique} cellules uniques suivies.")
+                    else:
+                        log(f"⚠️ {fname} : Aucune cellule suivie.")
 
                 except Exception as ex:
                     log(f"Erreur {os.path.basename(pth)} : {ex}")
+                    import traceback
+                    log(traceback.format_exc())
 
                 done += 1
                 progress.value = done / max(1, total)
@@ -979,44 +1037,58 @@ def main(page: ft.Page):
         out_dir = os.path.join(root, "outputs")
 
 
-# --- GESTION DES GRAPHIQUES (Version Matplotlib Corrigée) ---
+        # --- GESTION DES GRAPHIQUES (Version Infaillible : Base64 Image) ---
         def show_graphs(e):
             import importlib
             import pipeline
+            import io
+            import base64
             
             try:
                 page.snack_bar = ft.SnackBar(ft.Text("Génération des graphiques..."))
                 page.snack_bar.open = True
                 page.update()
 
-                # 1. Vérifier qu'il y a des données
+                # 1. Vérifier les données
                 if GLOBAL_FULL_DF is None or GLOBAL_FULL_DF.empty:
                     page.snack_bar = ft.SnackBar(ft.Text("Aucune donnée à afficher. Lancez une analyse d'abord !", color="red"))
                     page.snack_bar.open = True
                     page.update()
                     return
 
-                # 2. Forcer le rechargement de pipeline pour être sûr d'avoir la bonne fonction
-                # (Ceci corrige le bug où l'app utilise une vieille version en mémoire)
+                # 2. Recharger pipeline
                 importlib.reload(pipeline)
                 from pipeline import plot_curves
 
                 # 3. Récupérer les figures
-                # Note : on utilise CURRENT_OUTPUT_DIR défini dans run_analysis
                 figs_data = plot_curves(GLOBAL_FULL_DF, out_dir=CURRENT_OUTPUT_DIR)
 
                 dlg_content = ft.Column(scroll=ft.ScrollMode.AUTO, height=600, width=900)
 
                 if not figs_data:
                     dlg_content.controls.append(
-                        ft.Text("Erreur : La fonction plot_curves n'a rien renvoyé (liste vide).", color="red")
+                        ft.Text("Erreur : La fonction plot_curves n'a rien renvoyé.", color="red")
                     )
                 else:
                     for title, fig in figs_data:
-                        # IMPORTANT : On force la taille ici pour que Flet l'affiche
+                        # --- CONVERSION FIGURE -> IMAGE BASE64 ---
+                        # C'est cette étape qui remplace MatplotlibChart et évite le crash
+                        buf = io.BytesIO()
+                        fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
+                        buf.seek(0)
+                        img_b64 = base64.b64encode(buf.read()).decode("utf-8")
+                        
+                        # On crée une image Flet
+                        chart_img = ft.Image(
+                            src_base64=img_b64,
+                            fit=ft.ImageFit.CONTAIN,
+                            expand=True
+                        )
+
+                        # On l'ajoute dans le container
                         chart_container = ft.Container(
-                            content=ft.MatplotlibChart(fig, expand=True, transparent=False),
-                            height=450,  # Hauteur fixe OBLIGATOIRE pour voir le graph
+                            content=chart_img,
+                            height=450, 
                             padding=10,
                             border=ft.border.all(1, "grey"),
                             border_radius=5,
@@ -1042,9 +1114,7 @@ def main(page: ft.Page):
             except Exception as ex:
                 log(f"[CRASH] Affichage courbes : {ex}")
                 import traceback
-                # Affiche l'erreur complète dans la petite fenêtre de logs de l'app
                 log(traceback.format_exc())
-
 
         # --- COMPARAISON DES RÉSULTATS (Version Corrigée) ---
         def show_comparison(e):
@@ -1290,13 +1360,7 @@ if __name__ == '__main__':
         tracking_tab.controls.append(table_container)
         tracking_tab.update()
 
-        # Initial render - Now safe because containers are on the page
         refresh_view(current_file_key)
-
-
-
-
-
 
     page.update()
 
