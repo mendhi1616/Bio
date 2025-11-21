@@ -152,7 +152,6 @@ def process_file(path, seg_method="auto", logger=None, debug=False, fast_mode=Fa
         )
 
         tracks = _track_labels(labels_list, max_dist=45.0, gap_frames=1, logger=logger)
-        tracks = filter_short_tracks(tracks, min_frames=10, logger=logger)
 
         if tracks is None or len(tracks) == 0:
             if logger: logger("[WARN] Tracking vide après filtrage.")
@@ -998,20 +997,6 @@ def recalculate_with_new_masks(path, new_masks, logger=None):
 
     if logger: logger("✅ Recalcul terminé.")
     return metrics, tracks
-
-def filter_short_tracks(tracks, min_frames=1, logger=None):
-    if tracks is None or tracks.empty:
-        return tracks
-
-    counts = tracks["track_id"].value_counts()
-    
-    valid_ids = counts[counts >= min_frames].index
-    
-    n_removed = len(counts) - len(valid_ids)
-    
-    if n_removed > 0 and logger:
-        logger(f"Nettoyage : {n_removed} pistes < {min_frames} frames supprimées.")       
-    return tracks[tracks["track_id"].isin(valid_ids)].copy()
 
 def detect_mitosis_events(tracks, max_dist=35.0, relative_area_tol=0.5):
     events = []
